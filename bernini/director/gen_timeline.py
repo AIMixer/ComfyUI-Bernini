@@ -15,6 +15,7 @@ GEN_BLANK_KEYS = frozenset({"t2i", "t2v", "r2i", "r2v"})
 GEN_IMAGE_KEYS = frozenset({"i2i", "i2v"})
 GEN_TASK_KEYS = GEN_BLANK_KEYS | GEN_IMAGE_KEYS
 PROMPT_BATCH_KEYS = frozenset({"t2i", "i2i", "r2i", "t2v", "i2v", "r2v"})
+VIDEO_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v"})
 IMAGE_BATCH_KEYS = frozenset({"t2i", "i2i", "r2i"})  # legacy alias
 
 MIN_GEN_FRAMES = 1
@@ -43,6 +44,10 @@ def is_prompt_batch_timeline(timeline: dict, task_key: str) -> bool:
 
 def is_image_batch_timeline(timeline: dict, task_key: str) -> bool:
     return is_prompt_batch_timeline(timeline, task_key)
+
+
+def is_video_batch_task_key(task_key: str) -> bool:
+    return task_key in VIDEO_BATCH_KEYS
 
 
 def gen_submode(timeline: dict, task_key: str) -> str:
@@ -315,7 +320,8 @@ def build_gen_director_plan(
         )
 
     export_mode = _resolve_export_mode(output_block)
-    if is_prompt_batch_timeline(timeline, task_key):
+    # Image prompt-batch (t2i/i2i/r2i) always merges to images list; video batch (t2v/i2v/r2v) respects export mode.
+    if is_prompt_batch_timeline(timeline, task_key) and not is_video_batch_task_key(task_key):
         export_mode = "all"
 
     source_clips = _build_gen_source_clips(

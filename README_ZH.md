@@ -154,8 +154,6 @@ ComfyUI-Bernini/
 
 本项目的 `engine/` 推理引擎**改编自** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper)（Apache-2.0）。向 kijai 及 WanVideoWrapper / WanVideo 生态的所有贡献者**致以崇高的敬意**，感谢他们为 ComfyUI WanVideo 社区做出的巨大贡献。
 
-`engine/` 中的 LoRA 线性算子与 SageAttention 自定义算子**参考自** [wuwukaka/ComfyUI-WanAnimatePlus](https://github.com/wuwukaka/ComfyUI-WanAnimatePlus)（Apache-2.0）。感谢 wuwukaka 的 Wan Animate Plus 优化实现。
-
 ## 致谢
 
 - [Bernini](https://bernini-ai.github.io/) — ByteDance 论文与模型框架

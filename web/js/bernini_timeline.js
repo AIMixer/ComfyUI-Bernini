@@ -636,8 +636,10 @@ class BerniniDirectorEditor {
             const output = {
                 ...this.timeline.output,
                 mode: outMode,
-                exportMode: "all",
             };
+            if (!isVideoBatchTask(taskKey)) {
+                output.exportMode = "all";
+            }
             if (i2iSrc?.width > 0 && i2iSrc?.height > 0) {
                 output.sourceWidth = i2iSrc.width;
                 output.sourceHeight = i2iSrc.height;
@@ -1239,6 +1241,8 @@ class BerniniDirectorEditor {
         this._directorMode = mode;
 
         const hideTimeline = isBatch || isGen;
+        const taskKey = this.getTaskKey();
+        const showBatchExport = isBatch && isVideoBatchTask(taskKey);
         this.btnVideo?.classList.toggle("hidden", hideTimeline);
         this.btnVideoAppend?.classList.toggle("hidden", hideTimeline);
         this.controlsBar?.classList.toggle("hidden", hideTimeline || isBatch);
@@ -1261,17 +1265,17 @@ class BerniniDirectorEditor {
         this.genGlobalFcRow?.classList.toggle("hidden", !isGen || !this.isGlobalMode());
         this.genSegFcRow?.classList.toggle("hidden", !isGen || this.isGlobalMode());
 
-        if (mode === "gen_blank" || (isBatch && imageBatchRequiresFixedOutput(this.getTaskKey()))) {
+        if (mode === "gen_blank" || (isBatch && imageBatchRequiresFixedOutput(taskKey))) {
             this.timeline.output = this.timeline.output || {};
             this.timeline.output.mode = "fixed";
-            if (isBatch) this.timeline.output.exportMode = "all";
+            if (isBatch && !isVideoBatchTask(taskKey)) this.timeline.output.exportMode = "all";
             if (this.outMode) {
                 this.outMode.value = "fixed";
                 this.outMode.disabled = true;
             }
             this.outLongWrap && (this.outLongWrap.style.display = "none");
             this.outFixedWrap?.classList.remove("hidden");
-        } else if (isBatch && (this.getTaskKey() === "i2i" || this.getTaskKey() === "i2v")) {
+        } else if (isBatch && taskKey === "i2i") {
             this.timeline.output = this.timeline.output || {};
             const modeVal = String(this.timeline.output.mode || "long_edge").toLowerCase();
             this.timeline.output.mode = modeVal === "fixed" ? "fixed" : "long_edge";
@@ -1281,6 +1285,12 @@ class BerniniDirectorEditor {
                 this.outMode.value = this.timeline.output.mode;
             }
             this.updateOutputModeUI();
+        } else if (isBatch && isVideoBatchTask(taskKey)) {
+            this.timeline.output = this.timeline.output || {};
+            if (this.outMode) {
+                this.outMode.disabled = false;
+                this.updateOutputModeUI();
+            }
         } else if (this.outMode) {
             this.outMode.disabled = false;
             this.updateOutputModeUI();
@@ -1291,14 +1301,14 @@ class BerniniDirectorEditor {
             this.outHint.textContent = (isGen || isBatch) ? genLayoutHint(this.getTaskKey()) : "";
         }
         if (this.outExportMode) {
-            this.outExportMode.disabled = isBatch;
-            this.outExportMode.classList.toggle("hidden", isBatch);
-            this.outExportMode.previousElementSibling?.classList.toggle("hidden", isBatch);
+            this.outExportMode.disabled = isBatch && !showBatchExport;
+            this.outExportMode.classList.toggle("hidden", isBatch && !showBatchExport);
+            this.outExportMode.previousElementSibling?.classList.toggle("hidden", isBatch && !showBatchExport);
         }
         if (this.outMaxFrames) {
-            this.outMaxFrames.disabled = isBatch;
-            this.outMaxFrames.classList.toggle("hidden", isBatch);
-            this.outMaxFrames.previousElementSibling?.classList.toggle("hidden", isBatch);
+            this.outMaxFrames.disabled = isBatch && !showBatchExport;
+            this.outMaxFrames.classList.toggle("hidden", isBatch && !showBatchExport);
+            this.outMaxFrames.previousElementSibling?.classList.toggle("hidden", isBatch && !showBatchExport);
         }
 
         if ((isGen || isBatch) && prev === "video") {

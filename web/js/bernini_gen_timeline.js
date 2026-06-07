@@ -74,9 +74,9 @@ export function genLayoutHint(taskKey) {
         case "t2i": return "文生图 · 多组提示词 · 固定宽高 · 全部导出至 images";
         case "i2i": return "图生图 · 每组上传源图 · 最长边缩放或固定宽高 · 全部导出至 images";
         case "r2i": return "参考主体生图 · 每组最多 5 张参考图 · 全部导出至 images";
-        case "t2v": return "文生视频 · 多组提示词 · 每组可设帧数 · 固定宽高 · 全部导出至 images";
-        case "r2v": return "参考主体生视频 · 每组最多 5 张参考图 · 每组可设帧数 · 固定宽高 · 全部导出至 images";
-        case "i2v": return "图生视频 · 实验性功能 · 源图首帧锚点 · 每组可设帧数";
+        case "t2v": return "文生视频 · 多组提示词 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出";
+        case "r2v": return "参考主体生视频 · 每组最多 5 张参考图 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出";
+        case "i2v": return "图生视频 · 实验性功能 · 源图首帧锚点 · 每组可设帧数 · 支持全部/分段导出";
         default: return "";
     }
 }

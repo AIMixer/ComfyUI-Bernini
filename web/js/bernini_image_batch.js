@@ -133,7 +133,9 @@ export function ensureImageBatchTimeline(editor) {
         const mode = String(editor.timeline.output.mode || "long_edge").toLowerCase();
         editor.timeline.output.mode = mode === "fixed" ? "fixed" : "long_edge";
     }
-    editor.timeline.output.exportMode = "all";
+    if (!isVideoBatchTask(taskKey)) {
+        editor.timeline.output.exportMode = "all";
+    }
     const defFc = defaultFrameCount(taskKey);
     if (taskKey === "i2v") {
         editor.timeline.video = {

@@ -398,8 +398,6 @@ class WanVideoDecode:
         latents = samples["samples"].clone()
         end_image = samples.get("end_image", None)
         has_ref = samples.get("has_ref", False)
-        has_prefix = samples.get("has_prefix", False)
-        canvas_expansion_px = samples.get("canvas_expansion_px", 0)
         drop_last = samples.get("drop_last", False)
         is_looped = samples.get("looped", False)
 
@@ -417,7 +415,6 @@ class WanVideoDecode:
             latents = latents[:, :, :-1]
 
         images = vae.decode(latents, device=device, end_=(end_image is not None), tiled=enable_vae_tiling, tile_size=(tile_x//8, tile_y//8), tile_stride=(tile_stride_x//8, tile_stride_y//8))[0]
-
 
         images = images.cpu().float()
 
@@ -437,10 +434,6 @@ class WanVideoDecode:
 
         if end_image is not None:
             images = images[:, 0:-1]
-
-        if canvas_expansion_px and not is_looped:
-            images = images[:, canvas_expansion_px:]
-
 
         vae.to(offload_device)
         mm.soft_empty_cache()

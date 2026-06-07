@@ -65,8 +65,6 @@ After download: merge `models/` into `ComfyUI/models`, install plugins/deps, dra
 
 The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (Apache-2.0). Deep respect and gratitude to kijai and all contributors to the WanVideo ecosystem.
 
-LoRA linear kernels and SageAttention custom ops in `engine/` **reference** [wuwukaka/ComfyUI-WanAnimatePlus](https://github.com/wuwukaka/ComfyUI-WanAnimatePlus) (Apache-2.0). Thanks to wuwukaka for the Wan Animate Plus optimizations.
-
 ## License
 
 - `bernini/` — MIT

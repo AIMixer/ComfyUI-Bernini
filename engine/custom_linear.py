@@ -3,55 +3,66 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from .gguf.gguf_utils import GGUFParameter, dequantize_gguf_tensor
 
-if not hasattr(torch.ops.wananimateplus, 'apply_lora'):
-    @torch.library.custom_op("wananimateplus::apply_lora", mutates_args=())
-    def apply_lora(weight: torch.Tensor, lora_diff_0: torch.Tensor, lora_diff_1: torch.Tensor, lora_diff_2: float, lora_strength: torch.Tensor) -> torch.Tensor:
-        patch_diff = torch.mm(
-            lora_diff_0.flatten(start_dim=1),
-            lora_diff_1.flatten(start_dim=1)
-        ).reshape(weight.shape)
 
-        alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
-        scale = lora_strength * alpha
+def _align_block_scale(scale: torch.Tensor, column_dim: int) -> torch.Tensor:
+    """Expand MXFP8 block-compressed scale rows to match weight width."""
+    if scale.ndim < 2 or scale.shape[-1] == column_dim:
+        return scale
+    blocks = column_dim // scale.shape[-1]
+    if blocks > 1 and blocks * scale.shape[-1] == column_dim:
+        return scale.repeat_interleave(blocks, dim=-1)
+    return scale
 
-        return weight + patch_diff * scale
 
-    @apply_lora.register_fake
-    def _(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
-        return weight.clone()
+@torch.library.custom_op("bernini::apply_lora", mutates_args=())
+def apply_lora(
+    weight: torch.Tensor,
+    lora_diff_0: torch.Tensor,
+    lora_diff_1: torch.Tensor,
+    lora_diff_2: float,
+    lora_strength: torch.Tensor,
+) -> torch.Tensor:
+    patch_diff = torch.mm(
+        lora_diff_0.flatten(start_dim=1),
+        lora_diff_1.flatten(start_dim=1),
+    ).reshape(weight.shape)
+    alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
+    return weight + patch_diff * lora_strength * alpha
 
-    @torch.library.impl("wananimateplus::apply_lora", "CUDA")
-    def _apply_lora_cuda(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
-        patch_diff = torch.mm(lora_diff_0.flatten(start_dim=1), lora_diff_1.flatten(start_dim=1)).reshape(weight.shape)
-        alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
-        return weight + patch_diff * lora_strength * alpha
 
-if not hasattr(torch.ops.wananimateplus, 'apply_single_lora'):
-    @torch.library.custom_op("wananimateplus::apply_single_lora", mutates_args=())
-    def apply_single_lora(weight: torch.Tensor, lora_diff: torch.Tensor, lora_strength: torch.Tensor) -> torch.Tensor:
-        return weight + lora_diff * lora_strength
+@apply_lora.register_fake
+def _apply_lora_meta(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
+    return weight.clone()
 
-    @apply_single_lora.register_fake
-    def _(weight, lora_diff, lora_strength):
-        return weight.clone()
 
-    @torch.library.impl("wananimateplus::apply_single_lora", "CUDA")
-    def _apply_single_lora_cuda(weight, lora_diff, lora_strength):
-        return weight + lora_diff * lora_strength
+@torch.library.custom_op("bernini::apply_single_lora", mutates_args=())
+def apply_single_lora(
+    weight: torch.Tensor,
+    lora_diff: torch.Tensor,
+    lora_strength: torch.Tensor,
+) -> torch.Tensor:
+    return weight + lora_diff * lora_strength
 
-if not hasattr(torch.ops.wananimateplus, 'linear_forward'):
-    @torch.library.custom_op("wananimateplus::linear_forward", mutates_args=())
-    def linear_forward(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
-        return torch.nn.functional.linear(input, weight, bias)
 
-    @linear_forward.register_fake
-    def _(input, weight, bias):
-        output_shape = list(input.shape[:-1]) + [weight.shape[0]]
-        return input.new_empty(output_shape)
+@apply_single_lora.register_fake
+def _apply_single_lora_meta(weight, lora_diff, lora_strength):
+    return weight.clone()
 
-    @torch.library.impl("wananimateplus::linear_forward", "CUDA")
-    def _linear_forward_cuda(input, weight, bias):
-        return torch.nn.functional.linear(input, weight, bias)
+
+@torch.library.custom_op("bernini::linear_forward", mutates_args=())
+def linear_forward(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return torch.nn.functional.linear(input, weight, bias)
+
+
+@linear_forward.register_fake
+def _linear_forward_meta(input, weight, bias):
+    out_features = weight.shape[0]
+    return input.new_empty(list(input.shape[:-1]) + [out_features])
+
 
 #based on https://github.com/huggingface/diffusers/blob/main/src/diffusers/quantizers/gguf/utils.py
 def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, scale_weights=None, compile_args=None, modules_to_not_convert=[]):
@@ -101,29 +112,23 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
 
 def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu")):
     remove_lora_from_module(module)
-    # Recursively set lora_diffs and lora_strengths for all CustomLinear layers
     for name, child in module.named_children():
         params = list(child.parameters())
-        if params:
-            device = params[0].device
-        else:
-            device = torch.device("cpu")
+        device = params[0].device if params else torch.device("cpu")
         child_prefix = (f"{module_prefix}{name}.")
         set_lora_params(child, patches, child_prefix, device)
     if isinstance(module, CustomLinear):
         key = f"diffusion_model.{module_prefix}weight"
         patch = patches.get(key, [])
-        #print(f"Processing LoRA patches for {key}: {len(patch)} patches found")
         if len(patch) == 0:
             key = key.replace("_orig_mod.", "")
             patch = patches.get(key, [])
-            #print(f"Processing LoRA patches for {key}: {len(patch)} patches found")
         if len(patch) != 0:
             lora_diffs = []
             for p in patch:
                 lora_obj = p[1]
                 if "head" in key:
-                    continue  # For now skip LoRA for head layers
+                    continue
                 elif hasattr(lora_obj, "weights"):
                     lora_diffs.append(lora_obj.weights)
                 elif isinstance(lora_obj, tuple) and lora_obj[0] == "diff":
@@ -133,7 +138,7 @@ def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu"
             lora_strengths = [p[0] for p in patch]
             module.set_lora_diffs(lora_diffs, device=device)
             module.set_lora_strengths(lora_strengths, device=device)
-            module._step.fill_(0)   # Initialize step for LoRA scheduling
+            module._step.fill_(0)
 
 
 class CustomLinear(nn.Linear):
@@ -156,44 +161,40 @@ class CustomLinear(nn.Linear):
         self.lora_strengths = []
         self.allow_compile = allow_compile
         self.is_gguf = is_gguf
+        self._bernini_ops = torch.ops.bernini
 
-        if not allow_compile:
-            self._apply_lora_impl = self._apply_lora_custom_op
-            self._apply_single_lora_impl = self._apply_single_lora_custom_op
-            self._linear_forward_impl = self._linear_forward_custom_op
+        if allow_compile:
+            self._merge_lora = self._merge_lora_eager
+            self._merge_single = self._merge_single_eager
+            self._matmul = self._matmul_eager
         else:
-            self._apply_lora_impl = self._apply_lora_direct
-            self._apply_single_lora_impl = self._apply_single_lora_direct
-            self._linear_forward_impl = self._linear_forward_direct
+            self._merge_lora = self._merge_lora_op
+            self._merge_single = self._merge_single_op
+            self._matmul = self._matmul_op
 
+    def _merge_lora_eager(self, weight, lora_a, lora_b, rank_scale, strength):
+        delta = torch.mm(lora_a.flatten(start_dim=1), lora_b.flatten(start_dim=1)).reshape(weight.shape)
+        norm = rank_scale / lora_b.shape[0] if rank_scale != 0.0 else 1.0
+        return weight + delta * strength * norm
 
-    # Direct implementations (no custom ops)
-    def _apply_lora_direct(self, weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
-        patch_diff = torch.mm(
-            lora_diff_0.flatten(start_dim=1),
-            lora_diff_1.flatten(start_dim=1)
-        ).reshape(weight.shape) + 0
-        alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
-        scale = lora_strength * alpha
-        return weight + patch_diff * scale
+    def _merge_single_eager(self, weight, delta, strength):
+        return weight + delta * strength
 
-    def _apply_single_lora_direct(self, weight, lora_diff, lora_strength):
-        return weight + lora_diff * lora_strength
-
-    def _linear_forward_direct(self, input, weight, bias):
+    def _matmul_eager(self, input, weight, bias):
         return torch.nn.functional.linear(input, weight, bias)
 
-    # Custom op implementations
-    def _apply_lora_custom_op(self, weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
-        return torch.ops.wananimateplus.apply_lora(weight, lora_diff_0, lora_diff_1,
-            float(lora_diff_2) if lora_diff_2 is not None else 0.0, lora_strength
+    def _merge_lora_op(self, weight, lora_a, lora_b, rank_scale, strength):
+        return self._bernini_ops.apply_lora(
+            weight, lora_a, lora_b,
+            float(rank_scale) if rank_scale is not None else 0.0,
+            strength,
         )
 
-    def _apply_single_lora_custom_op(self, weight, lora_diff, lora_strength):
-        return torch.ops.wananimateplus.apply_single_lora(weight, lora_diff, lora_strength)
+    def _merge_single_op(self, weight, delta, strength):
+        return self._bernini_ops.apply_single_lora(weight, delta, strength)
 
-    def _linear_forward_custom_op(self, input, weight, bias):
-        return torch.ops.wananimateplus.linear_forward(input, weight, bias)
+    def _matmul_op(self, input, weight, bias):
+        return self._bernini_ops.linear_forward(input, weight, bias)
 
     def set_lora_diffs(self, lora_diffs, device=torch.device("cpu")):
         self.lora_diffs = []
@@ -208,93 +209,70 @@ class CustomLinear(nn.Linear):
                 self.lora_diffs.append(f"lora_diff_{i}_0")
 
     def set_lora_strengths(self, lora_strengths, device=torch.device("cpu")):
-        self._lora_strength_tensors = []
         self._lora_strength_is_scheduled = []
         self._step = self._step.to(device)
         for i, strength in enumerate(lora_strengths):
-            if isinstance(strength, list):
-                tensor = torch.tensor(strength, dtype=self.compute_dtype, device=device)
-                self.register_buffer(f"_lora_strength_{i}", tensor)
-                self._lora_strength_is_scheduled.append(True)
-            else:
-                tensor = torch.tensor([strength], dtype=self.compute_dtype, device=device)
-                self.register_buffer(f"_lora_strength_{i}", tensor)
-                self._lora_strength_is_scheduled.append(False)
+            scheduled = isinstance(strength, list)
+            values = strength if scheduled else [strength]
+            tensor = torch.tensor(values, dtype=self.compute_dtype, device=device)
+            self.register_buffer(f"_lora_strength_{i}", tensor)
+            self._lora_strength_is_scheduled.append(scheduled)
 
-    def _get_lora_strength(self, idx):
-        strength_tensor = getattr(self, f"_lora_strength_{idx}")
+    def _strength_at(self, idx):
+        buf = getattr(self, f"_lora_strength_{idx}")
         if self._lora_strength_is_scheduled[idx]:
-            return strength_tensor.index_select(0, self._step).squeeze(0)
-        return strength_tensor[0]
+            return buf.index_select(0, self._step).squeeze(0)
+        return buf[0]
 
-    def _get_weight_with_lora(self, weight):
-        """Apply LoRA using custom ops to avoid graph breaks"""
+    def _fold_lora_into_weight(self, weight):
         if not hasattr(self, "lora_diff_0_0"):
             return weight
-
-        for idx, lora_diff_names in enumerate(self.lora_diffs):
-            lora_strength = self._get_lora_strength(idx)
-
-            if isinstance(lora_diff_names, tuple):
-                lora_diff_0 = getattr(self, lora_diff_names[0])
-                lora_diff_1 = getattr(self, lora_diff_names[1])
-                lora_diff_2 = getattr(self, lora_diff_names[2])
-
-                weight = self._apply_lora_impl(
-                    weight, lora_diff_0, lora_diff_1,
-                    float(lora_diff_2) if lora_diff_2 is not None else 0.0, lora_strength
+        for idx, spec in enumerate(self.lora_diffs):
+            strength = self._strength_at(idx)
+            if isinstance(spec, tuple):
+                a = getattr(self, spec[0])
+                b = getattr(self, spec[1])
+                rank_scale = getattr(self, spec[2])
+                weight = self._merge_lora(
+                    weight, a, b,
+                    float(rank_scale) if rank_scale is not None else 0.0,
+                    strength,
                 )
             else:
-                lora_diff = getattr(self, lora_diff_names)
-                weight = self._apply_single_lora_impl(weight, lora_diff, lora_strength)
+                weight = self._merge_single(weight, getattr(self, spec), strength)
         return weight
 
-    def _prepare_weight(self, input):
-        """Prepare weight tensor - handles both regular and GGUF weights"""
+    def _resolve_weight(self, input):
         if self.is_gguf:
-            weight = dequantize_gguf_tensor(self.weight).to(self.compute_dtype)
-        else:
-            weight = self.weight.to(input)
-        return weight
+            return dequantize_gguf_tensor(self.weight).to(self.compute_dtype)
+        return self.weight.to(input)
 
     def forward(self, input):
-        weight = self._prepare_weight(input)
+        weight = self._resolve_weight(input)
+        bias = self.bias.to(input if not self.is_gguf else self.compute_dtype) if self.bias is not None else None
 
-        if self.bias is not None:
-            bias = self.bias.to(input if not self.is_gguf else self.compute_dtype)
-        else:
-            bias = None
-
-        # Only apply scale_weight for non-GGUF models
         if not self.is_gguf and self.scale_weight is not None:
-            sw = self.scale_weight
-            # MXFP8 block-wise scale: expand from [out, in//block] to [out, in]
-            if sw.ndim > 1 and sw.shape[-1] != weight.shape[-1]:
-                block_size = weight.shape[-1] // sw.shape[-1]
-                if block_size > 1:
-                    sw = sw.repeat_interleave(block_size, dim=-1)
+            sw = _align_block_scale(self.scale_weight, weight.shape[-1])
             if weight.numel() < input.numel():
                 weight = weight * sw
             else:
                 input = input * sw
 
-        weight = self._get_weight_with_lora(weight)
-        out = self._linear_forward_impl(input, weight, bias)
+        weight = self._fold_lora_into_weight(weight)
+        out = self._matmul(input, weight, bias)
         del weight, input, bias
         return out
 
 def update_lora_step(module, step):
-    for name, submodule in module.named_modules():
+    for submodule in module.modules():
         if isinstance(submodule, CustomLinear) and hasattr(submodule, "_step"):
             submodule._step.fill_(step)
 
 def remove_lora_from_module(module):
-    for name, submodule in module.named_modules():
+    for submodule in module.modules():
         if hasattr(submodule, "lora_diffs"):
             for i in range(len(submodule.lora_diffs)):
-                if hasattr(submodule, f"lora_diff_{i}_0"):
-                    delattr(submodule, f"lora_diff_{i}_0")
-                if hasattr(submodule, f"lora_diff_{i}_1"):
-                    delattr(submodule, f"lora_diff_{i}_1")
-                if hasattr(submodule, f"lora_diff_{i}_2"):
-                    delattr(submodule, f"lora_diff_{i}_2")
+                for suffix in ("_0", "_1", "_2"):
+                    attr = f"lora_diff_{i}{suffix}"
+                    if hasattr(submodule, attr):
+                        delattr(submodule, attr)

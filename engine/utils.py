@@ -704,11 +704,12 @@ def check_duplicate_nodes():
 
     wanvideo_dirs = []
 
-    # Check all directories in custom_nodes
+    # Check all directories in custom_nodes for conflicting WanVideo plugin installs
     for path in custom_nodes_dir.iterdir():
-        if (path.is_dir() and
-            path != current_path and
-            'wananimateplus' in path.name.lower()):
+        if not path.is_dir() or path == current_path:
+            continue
+        name = path.name.lower()
+        if "wanvideo" in name and "bernini" not in name:
             wanvideo_dirs.append(str(path))
 
     return wanvideo_dirs
