@@ -78,15 +78,13 @@ def load_video_resampled(
     source_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     source_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
-    if storage_width and storage_height:
-        out_w, out_h = int(storage_width), int(storage_height)
-    else:
-        out_w, out_h, _, _ = resolve_output_dimensions(
-            source_w,
-            source_h,
-            mode="long_edge",
-            long_edge=long_edge,
-        )
+    out_w, out_h, rotate_90_cw = _resolve_load_dimensions(
+        source_w,
+        source_h,
+        storage_width=storage_width,
+        storage_height=storage_height,
+        long_edge=long_edge,
+    )
 
     unique = sorted({int(i) for i in frame_indices})
     decoded: dict[int, np.ndarray] = {}
@@ -103,6 +101,8 @@ def load_video_resampled(
                 decoded[src_idx] = fallback
             continue
 
+        if rotate_90_cw:
+            bgr = cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
         if (bgr.shape[1], bgr.shape[0]) != (out_w, out_h):
             bgr = cv2.resize(bgr, (out_w, out_h), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -121,6 +121,59 @@ def load_video_resampled(
         last = rows[-1]
 
     return torch.from_numpy(np.stack(rows, axis=0))
+
+
+def _aspect_ratio(w: int, h: int) -> float:
+    return w / h if h > 0 else 0.0
+
+
+def _aspect_close(a: float, b: float, *, tol: float = 0.04) -> bool:
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) / max(a, b) <= tol
+
+
+def _resolve_load_dimensions(
+    source_w: int,
+    source_h: int,
+    *,
+    storage_width: int | None,
+    storage_height: int | None,
+    long_edge: int,
+) -> tuple[int, int, bool]:
+    """Return (out_w, out_h, rotate_90_cw) for proportional long-edge loading."""
+    if storage_width and storage_height and source_w > 0 and source_h > 0:
+        sw, sh = int(storage_width), int(storage_height)
+        native_ar = _aspect_ratio(source_w, source_h)
+        storage_ar = _aspect_ratio(sw, sh)
+        if _aspect_close(native_ar, storage_ar):
+            return sw, sh, False
+        # Browser/UI metadata often includes rotation; OpenCV raw frames may be transposed.
+        if _aspect_close(_aspect_ratio(source_h, source_w), storage_ar):
+            log.info(
+                "Video %dx%d decoded transposed vs storage %dx%d; applying 90° rotation before scale",
+                source_w,
+                source_h,
+                sw,
+                sh,
+            )
+            return sw, sh, True
+        log.warning(
+            "storage %dx%d aspect mismatch vs native %dx%d; using proportional long_edge=%d",
+            sw,
+            sh,
+            source_w,
+            source_h,
+            long_edge,
+        )
+
+    out_w, out_h, _, _ = resolve_output_dimensions(
+        source_w,
+        source_h,
+        mode="long_edge",
+        long_edge=long_edge,
+    )
+    return out_w, out_h, False
 
 
 def parse_frame_map_entry(entry: Any, default_clip: int = 0) -> tuple[int, int]:

@@ -167,7 +167,7 @@ def execute_director_plan(
         ref_kwargs = refs_to_kwargs_for_context(seg.task_key, seg.refs)
         source_arg = clip if _needs_source_video(seg.task_key) else None
 
-        if seg.task_key in ("i2i", "i2v") and clip is not None and clip.shape[0] > 0:
+        if clip is not None and clip.shape[0] > 0:
             ctx_h, ctx_w = int(clip.shape[1]), int(clip.shape[2])
         else:
             ctx_w, ctx_h = plan.width, plan.height

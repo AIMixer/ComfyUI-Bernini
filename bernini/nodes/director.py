@@ -164,13 +164,13 @@ class BerniniDirector:
 
     RETURN_TYPES = ("IMAGE", "STRING", "INT", "IMAGE")
     RETURN_NAMES = ("images", "report", "frame_count", "segment_images")
-    OUTPUT_IS_LIST = (False, False, False, True)
+    OUTPUT_IS_LIST = (True, False, False, True)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
         "Bernini video director: upload video/refs in-node, split timeline, global or per-segment prompts. "
-        "Outputs: images (merged), segment_images (list — per prompt group for t2i/i2i/r2i image batch, "
-        "or per-segment when export mode is segments). "
+        "Outputs: images (list — one merged clip when export=all, one clip per timeline segment or "
+        "prompt group when export=segments / prompt batch), segment_images (same list when applicable). "
         "Separate high-noise / low-noise sampler settings (cfg, seed, force_offload, add_noise, extra_args)."
     )
 
@@ -272,7 +272,7 @@ class BerniniDirector:
 
         log.info(plan_summary(plan).replace("\n", " | "))
 
-        images, segment_outputs, report = execute_director_plan(
+        combined, segment_outputs, report = execute_director_plan(
             plan,
             node_id=unique_id,
             vae=vae,
@@ -305,13 +305,25 @@ class BerniniDirector:
             tiled_vae=tiled_vae,
             vae_force_offload=vae_force_offload,
         )
-        if is_prompt_batch_timeline(plan.raw, plan.global_task_key) or plan.export_mode == "segments":
+
+        is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
+        is_segments = plan.export_mode == "segments"
+
+        if is_batch or is_segments:
+            images_out = segment_outputs
             segment_images = segment_outputs
             frame_count = sum(int(s.shape[0]) for s in segment_outputs)
+            if is_segments and len(segment_outputs) > 1:
+                report = (
+                    report
+                    + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output "
+                    "(one MP4 per segment when connected to Video Combine)."
+                )
         else:
+            images_out = [combined]
             segment_images = []
-            frame_count = int(images.shape[0])
-        return (images, report, frame_count, segment_images)
+            frame_count = int(combined.shape[0])
+        return (images_out, report, frame_count, segment_images)
 
 
 BerniniDirectorExecute = BerniniDirector

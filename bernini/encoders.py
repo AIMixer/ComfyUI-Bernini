@@ -93,8 +93,11 @@ class WanVaeEncoder(ContextStreamEncoder):
     def encode_source_video(
         self, frames: torch.Tensor, width: int, height: int, frame_limit: int
     ) -> torch.Tensor:
-        canvas = fit_canvas(frames[:frame_limit], width, height)
-        return self._run_encode(self._video_to_vae_input(canvas))
+        clipped = frames[:frame_limit]
+        fh, fw = int(clipped.shape[1]), int(clipped.shape[2])
+        if fw != width or fh != height:
+            clipped = fit_canvas(clipped, width, height)
+        return self._run_encode(self._video_to_vae_input(clipped))
 
     def encode_reference_video(
         self, frames: torch.Tensor, max_edge: int, frame_limit: int

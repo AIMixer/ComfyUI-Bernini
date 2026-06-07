@@ -809,7 +809,7 @@ class BerniniDirectorEditor {
             </span>
             <span class="bd-meta" data-r="out-preview">—</span>
             <span class="bd-meta hidden" data-r="out-hint"></span>
-            <label title="全部导出：合并为一个视频；分段导出：每段时间轴片段单独输出">导出方式</label>
+            <label title="全部导出：合并为一个视频；分段导出：每段时间轴片段单独输出（images 输出为列表，Video Combine 会生成多个 MP4）">导出方式</label>
             <select class="bd-select" data-r="out-export-mode" title="输出方式">
                 <option value="all">全部导出</option>
                 <option value="segments">分段导出</option>

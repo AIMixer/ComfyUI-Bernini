@@ -354,17 +354,17 @@ def build_director_plan(
 
     load_timeline = _trim_timeline_for_export(timeline, export_total) if export_total < source_total else timeline
     source_video = load_source_video_from_timeline(load_timeline)
-    source_h = int(source_video.shape[1])
-    source_w = int(source_video.shape[2])
+    loaded_h = int(source_video.shape[1])
+    loaded_w = int(source_video.shape[2])
     video_meta = timeline.get("video") or {}
-    source_w = int(video_meta.get("width") or source_w or width)
-    source_h = int(video_meta.get("height") or source_h or height)
+    meta_w = int(video_meta.get("width") or 0)
+    meta_h = int(video_meta.get("height") or 0)
 
     output_block = timeline.get("output") or {}
     export_mode = _resolve_export_mode(output_block)
     out_w, out_h, ref_max, output_mode = resolve_output_dimensions(
-        int(video_meta.get("width") or source_w or width),
-        int(video_meta.get("height") or source_h or height),
+        loaded_w or meta_w or int(width),
+        loaded_h or meta_h or int(height),
         mode=str(output_block.get("mode") or "long_edge"),
         long_edge=int(output_block.get("longEdge") or output_block.get("long_edge") or ref_max_size or 848),
         fixed_width=int(output_block.get("width") or timeline.get("width") or width),
@@ -416,8 +416,8 @@ def build_director_plan(
         height=out_h,
         ref_max_size=ref_max,
         output_mode=output_mode,
-        source_width=int(video_meta.get("width") or source_w),
-        source_height=int(video_meta.get("height") or source_h),
+        source_width=int(meta_w or loaded_w),
+        source_height=int(meta_h or loaded_h),
         global_task_type=task_type,
         global_task_key=resolve_task_key(task_type),
         global_prompt=prompt,
