@@ -79,9 +79,29 @@
 | `umt5-xxl-enc-fp8_e4m3fn.safetensors` | `models/text_encoders/`（非 scaled fp8，约 6.7 GB） |
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `models/text_encoders/`（ComfyUI scaled fp8，加载时会反量化到 bf16） |
 
-**Bernini Text Encode Cached** 推荐使用 `umt5-xxl-enc-bf16.safetensors`。若使用 scaled fp8 版本，节点会在加载时自动反量化（显存占用与 bf16 相近，不节省 VRAM）。
+### 量化模型（GGUF / FP8）
 
-推荐：[Kijai/WanVideo_comfy_fp8_scaled/Bernini](https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/tree/main/Bernini)
+**下载地址：** [Comfyit 搅拌站 · 文章 489](https://comfyit.cn/article/489)（含 GGUF 各档位、scaled FP8、VAE、T5 及示例工作流 JSON）。
+
+**Wan 2.2 Bernini** 提供多档量化权重（GGUF + scaled FP8），放入 `models/diffusion_models/`，在 **Bernini Model Loader** 中分别加载 **HIGH** 与 **LOW**（支持 GGUF）。
+
+| 档位 | GGUF 文件名（LOW / HIGH 各一份） | 最低显存（Bernini Director） |
+|------|----------------------------------|------------------------------|
+| **Q4_K_M（最低档）** | `Wan22_Bernini_LOW-Q4_K_M.gguf` · `Wan22_Bernini_HIGH-Q4_K_M.gguf` | **8 GB** |
+| Q5_K_M | `Wan22_Bernini_LOW-Q5_K_M.gguf` · `Wan22_Bernini_HIGH-Q5_K_M.gguf` | **10 GB** |
+| Q6_K | `Wan22_Bernini_LOW-Q6_K.gguf` · `Wan22_Bernini_HIGH-Q6_K.gguf` | **12 GB** |
+| Q8_0 | `Wan22_Bernini_LOW-Q8_0.gguf` · `Wan22_Bernini_HIGH-Q8_0.gguf` | **16 GB** |
+
+**FP8 safetensors（scaled）：**
+
+- `Wan22_Bernini_LOW_fp8_e4m3fn_scaled.safetensors`
+- `Wan22_Bernini_HIGH_fp8_e4m3fn_scaled.safetensors`
+
+**显存建议（导演台双阶段 HIGH + LOW）：** Q4 最低 **8 GB**；Q5 最低 **10 GB**；Q6 最低 **12 GB**；Q8 最低 **16 GB**。建议 HIGH/LOW 均开启 **Block Swap**；T5 使用磁盘缓存或 fp8 文本编码器。
+
+> 上文所列 **GGUF / Wan22 FP8 量化包** 均从 **[comfyit.cn/article/489](https://comfyit.cn/article/489)** 下载。Kijai 原版 FP8（非 GGUF）另见 [HuggingFace](https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/tree/main/Bernini)。
+
+**Bernini Text Encode Cached** 推荐使用 `umt5-xxl-enc-bf16.safetensors`。若使用 scaled fp8 版本，节点会在加载时自动反量化（显存占用与 bf16 相近，不节省 VRAM）。
 
 ## 示例工作流下载
 

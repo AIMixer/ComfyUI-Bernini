@@ -24,9 +24,31 @@ Standalone ComfyUI plugin with a **complete Wan 2.2 Bernini pipeline** that does
 
 3. **Restart ComfyUI**. Nodes appear under the **Bernini** category.
 
-4. **Download Bernini weights** from [Kijai/HuggingFace](https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/tree/main/Bernini) into `ComfyUI/models/` (`diffusion_models/`, `vae/`, `text_encoders/`).
+4. **Download models** — quantized GGUF / FP8 + workflows: **[comfyit.cn/article/489](https://comfyit.cn/article/489)**; original Kijai FP8 only: [HuggingFace Bernini](https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/tree/main/Bernini). Put weights under `ComfyUI/models/` (`diffusion_models/`, `vae/`, `text_encoders/`). See [Quantized models](#quantized-models).
 
 5. **Run a workflow**: Model Loader → Context Embeds → Sampler → Decode. Example JSON workflows: [Comfyit article 489](https://comfyit.cn/article/489).
+
+## Quantized models
+
+**Download:** [Comfyit article 489 — Bernini models & workflows](https://comfyit.cn/article/489) (GGUF quantizations, scaled FP8, VAE, T5, and example JSON).
+
+**Wan 2.2 Bernini** diffusion weights are available in **GGUF** and **FP8 safetensors** quantizations. Place files under `ComfyUI/models/diffusion_models/` and load both **HIGH** and **LOW** in **Bernini Model Loader** (GGUF is supported).
+
+| Tier | GGUF (LOW / HIGH) | Min VRAM (Bernini Director) |
+|------|-------------------|----------------------------|
+| **Q4_K_M** (lowest) | `Wan22_Bernini_LOW-Q4_K_M.gguf` · `Wan22_Bernini_HIGH-Q4_K_M.gguf` | **8 GB** |
+| Q5_K_M | `Wan22_Bernini_LOW-Q5_K_M.gguf` · `Wan22_Bernini_HIGH-Q5_K_M.gguf` | **10 GB** |
+| Q6_K | `Wan22_Bernini_LOW-Q6_K.gguf` · `Wan22_Bernini_HIGH-Q6_K.gguf` | **12 GB** |
+| Q8_0 | `Wan22_Bernini_LOW-Q8_0.gguf` · `Wan22_Bernini_HIGH-Q8_0.gguf` | **16 GB** |
+
+**FP8 safetensors** (scaled, same naming as Kijai Bernini pack):
+
+- `Wan22_Bernini_LOW_fp8_e4m3fn_scaled.safetensors`
+- `Wan22_Bernini_HIGH_fp8_e4m3fn_scaled.safetensors`
+
+**VRAM tips (Bernini Director, HIGH + LOW):** Q4 → 8 GB min; Q5 → 10 GB; Q6 → 12 GB; Q8 → 16 GB. Enable **Block Swap** on both loaders; use T5 disk cache or fp8 text encoder where possible.
+
+> All quantized builds above are included in the resource pack at **[comfyit.cn/article/489](https://comfyit.cn/article/489)**. For the original non-GGUF FP8 pack from Kijai, see [HuggingFace](https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/tree/main/Bernini).
 
 ## Node chain
 
