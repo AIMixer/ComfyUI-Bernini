@@ -1,0 +1,19 @@
+[project]
+name = "ComfyUI-Bernini"
+description = "ComfyUI nodes for Bernini latent semantic planning (Wan 2.2 video generation & editing)"
+version = "0.2.0"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/your-org/ComfyUI-Bernini"
+Documentation = "https://bernini-ai.github.io/#overview"
+
+[tool.comfy]
+PublisherId = "bernini"
+DisplayName = "ComfyUI-Bernini"
+Icon = ""
+Includes = []
+
+[tool.comfy.node]
+Category = "Bernini"
