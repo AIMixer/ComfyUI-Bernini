@@ -44,6 +44,8 @@ def report_director_progress(
     phase_max: float = 1,
     frames_label: str = "",
     task_key: str = "",
+    timeline_segment_index: int | None = None,
+    timeline_segment_total: int | None = None,
 ) -> None:
     if not node_id:
         return
@@ -61,10 +63,24 @@ def report_director_progress(
         overall_value = overall_max
         remaining_segments = 0
 
+    timeline_seg = (
+        timeline_segment_index + 1
+        if timeline_segment_index is not None
+        else segment_index + 1
+    )
+    timeline_total = timeline_segment_total if timeline_segment_total is not None else segment_total
+    partial_run = (
+        timeline_segment_total is not None
+        and segment_total < timeline_segment_total
+    )
+
     payload = {
         "node_id": str(node_id),
         "segment": segment_index + 1,
         "segment_total": segment_total,
+        "timeline_segment": timeline_seg,
+        "timeline_segment_total": timeline_total,
+        "partial_run": partial_run,
         "phase": phase,
         "phase_label": PHASE_LABELS.get(phase, phase),
         "phase_value": phase_value,
@@ -86,6 +102,8 @@ def report_director_progress(
             pct = int(100 * overall_value / overall_max) if overall_max else 0
             if phase == "plan" and segment_total > 1:
                 seg_txt = f"共 {segment_total} 段"
+            elif partial_run:
+                seg_txt = f"段 #{timeline_seg}（{segment_index + 1}/{segment_total}）"
             else:
                 seg_txt = f"段 {segment_index + 1}/{segment_total}" if segment_total else "准备"
             srv.send_progress_text(f"{seg_txt} · {label} · {pct}%", str(node_id))
@@ -143,7 +161,12 @@ def report_director_finish(node_id: str | None, segment_total: int) -> None:
     )
 
 
-def report_director_planning(node_id: str | None, segment_total: int = 1) -> None:
+def report_director_planning(
+    node_id: str | None,
+    segment_total: int = 1,
+    *,
+    timeline_segment_total: int | None = None,
+) -> None:
     report_director_progress(
         node_id,
         segment_index=0,
@@ -151,4 +174,5 @@ def report_director_planning(node_id: str | None, segment_total: int = 1) -> Non
         phase="plan",
         phase_value=0,
         phase_max=1,
+        timeline_segment_total=timeline_segment_total,
     )

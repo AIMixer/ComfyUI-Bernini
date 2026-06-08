@@ -50,6 +50,14 @@ export function imageBatchRequiresFixedOutput(taskKey) {
     return taskKey === "t2i" || taskKey === "r2i" || taskKey === "t2v" || taskKey === "r2v";
 }
 
+/** Maximum frames per diffusion segment (model / VRAM practical limit). */
+export const MAX_GEN_FRAMES = 512;
+
+/** v2v uses source video only — no reference image slots (image0–4). */
+export function taskUsesReferenceImages(taskKey) {
+    return taskKey !== "v2v";
+}
+
 export function defaultFrameCount(taskKey) {
     if (isImageBatchTask(taskKey)) return 1;
     if (isVideoBatchTask(taskKey)) return 81;
@@ -71,12 +79,12 @@ export function sumFrameCounts(segments) {
 
 export function genLayoutHint(taskKey) {
     switch (taskKey) {
-        case "t2i": return "文生图 · 多组提示词 · 固定宽高 · 全部导出至 images";
-        case "i2i": return "图生图 · 每组上传源图 · 最长边缩放或固定宽高 · 全部导出至 images";
-        case "r2i": return "参考主体生图 · 每组最多 5 张参考图 · 全部导出至 images";
-        case "t2v": return "文生视频 · 多组提示词 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出";
-        case "r2v": return "参考主体生视频 · 每组最多 5 张参考图 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出";
-        case "i2v": return "图生视频 · 实验性功能 · 源图首帧锚点 · 每组可设帧数 · 支持全部/分段导出";
+        case "t2i": return "文生图 · 多组提示词 · 固定宽高 · 全部导出至 images · 选择运行";
+        case "i2i": return "图生图 · 每组上传源图 · 全部导出至 images · 选择运行";
+        case "r2i": return "参考主体生图 · 每组最多 5 张参考图 · 全部导出至 images · 选择运行";
+        case "t2v": return "文生视频 · 多组提示词 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出 · 选择运行";
+        case "r2v": return "参考主体生视频 · 每组最多 5 张参考图 · 每组可设帧数 · 支持全部/分段导出 · 选择运行";
+        case "i2v": return "图生视频 · 实验性功能 · 源图首帧锚点 · 每组可设帧数 · 支持全部/分段导出 · 选择运行";
         default: return "";
     }
 }

@@ -1,3 +1,4 @@
+# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights

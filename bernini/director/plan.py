@@ -22,10 +22,7 @@ from ..task_prompts import get_task_prompt_spec, resolve_task_key
 from ..video_io import (
     logical_frame_count,
     logical_frame_map,
-    load_multi_clip_timeline,
-    load_video_resampled,
-    parse_frame_map_entry,
-    resolve_video_path,
+    load_timeline_segment,
     video_clips_from_timeline,
 )
 from .gen_timeline import (
@@ -83,6 +80,7 @@ class DirectorPlan:
     source_total_frames: int = 0
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
+    run_indices: frozenset[int] | None = None  # None = run all segments
 
     @property
     def segment_count(self) -> int:
@@ -127,57 +125,13 @@ def load_reference_tensor(ref: dict) -> torch.Tensor | None:
 
 
 def load_source_video_from_timeline(timeline: dict) -> torch.Tensor:
-    video = timeline.get("video") or {}
-    frames_b64 = video.get("frames") or []
-    if frames_b64:
-        chunks: list[torch.Tensor] = []
-        for frame_b64 in frames_b64:
-            chunks.append(_decode_image_b64(frame_b64))
-        if not chunks:
-            raise ValueError("Uploaded video has no decodable frames.")
-        return torch.cat(chunks, dim=0)
-
-    clips = video_clips_from_timeline(timeline)
-    if not clips:
-        raise ValueError(
-            "No source video in Bernini Director. Upload a video inside the node timeline UI before running."
-        )
-
-    frame_map = logical_frame_map(timeline)
-    if not frame_map:
-        raise ValueError("No frames in Bernini Director timeline frameMap.")
-
-    frame_rate = float(timeline.get("frameRate") or 24)
-    output_block = timeline.get("output") or {}
-    default_long_edge = int(
-        output_block.get("longEdge")
-        or output_block.get("long_edge")
-        or timeline.get("refMaxSize")
-        or 848
-    )
-
-    entries = [parse_frame_map_entry(e) for e in frame_map]
-    single_clip = len(clips) == 1 and all(c == 0 for c, _ in entries)
-
-    if single_clip:
-        clip = clips[0]
-        path = resolve_video_path(clip)
-        indices = [f for _, f in entries]
-        return load_video_resampled(
-            path,
-            frame_rate,
-            indices,
-            storage_width=clip.get("storageWidth"),
-            storage_height=clip.get("storageHeight"),
-            long_edge=default_long_edge,
-        )
-
-    return load_multi_clip_timeline(
-        timeline,
-        frame_map,
-        frame_rate=frame_rate,
-        default_long_edge=default_long_edge,
-    )
+    """Load all logical frames (legacy). Prefer load_timeline_segment for long videos."""
+    total = logical_frame_count(timeline)
+    if total <= 0:
+        video = timeline.get("video") or {}
+        if not (video.get("frames") or []):
+            raise ValueError("No frames in Bernini Director timeline.")
+    return load_timeline_segment(timeline, 0, max(1, total))
 
 
 def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
@@ -271,18 +225,38 @@ def _trim_timeline_for_export(timeline: dict, export_total: int) -> dict:
     frames_b64 = video.get("frames") or []
     if frames_b64 and export_total < len(frames_b64):
         video["frames"] = frames_b64[:export_total]
-    fm = logical_frame_map(timeline)
-    if fm and export_total < len(fm):
-        video["frameMap"] = fm[:export_total]
-    elif fm:
-        video["frameMap"] = fm
+    frame_map = video.get("frameMap") or []
+    if frame_map and export_total < len(frame_map):
+        video["frameMap"] = frame_map[:export_total]
     t["video"] = video
     t["totalFrames"] = export_total
     return t
 
 
-def count_timeline_segments(timeline_data: str) -> int:
-    """Estimate segment count from timeline JSON without loading video."""
+def _parse_run_selection(timeline: dict, segment_count: int) -> frozenset[int] | None:
+    """Return selected segment indices, or None when all segments should run."""
+    enabled = bool(timeline.get("runSelectEnabled") or timeline.get("run_select_enabled"))
+    if not enabled:
+        return None
+    raw = timeline.get("runSelection")
+    if raw is None:
+        raw = timeline.get("run_selection")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    indices = {int(i) for i in raw if 0 <= int(i) < segment_count}
+    if not indices:
+        raise ValueError(
+            "Bernini Director: 「选择运行」已开启但未勾选任何片段/提示词组。请至少勾选一组再执行。"
+        )
+    if len(indices) >= segment_count:
+        return None
+    return frozenset(indices)
+
+
+def count_all_timeline_segments(timeline_data: str) -> int:
+    """Total segment count on the timeline (ignores run selection)."""
     if not timeline_data or not str(timeline_data).strip():
         return 1
     try:
@@ -301,6 +275,20 @@ def count_timeline_segments(timeline_data: str) -> int:
     plan_total = export_total or source_total or 1
     ranges = _segment_ranges_from_timeline(timeline, source_total or plan_total)
     return max(1, len(_clip_segment_ranges(ranges, plan_total)))
+
+
+def count_timeline_segments(timeline_data: str) -> int:
+    """Segments that will run (respects run selection when enabled)."""
+    if not timeline_data or not str(timeline_data).strip():
+        return 1
+    try:
+        timeline = json.loads(timeline_data)
+    except json.JSONDecodeError:
+        return 1
+
+    seg_count = count_all_timeline_segments(timeline_data)
+    run_sel = _parse_run_selection(timeline, seg_count)
+    return len(run_sel) if run_sel is not None else seg_count
 
 
 def build_director_plan(
@@ -344,7 +332,7 @@ def build_director_plan(
         )
 
     frame_map = logical_frame_map(timeline)
-    source_total = len(frame_map) or int(timeline.get("totalFrames") or total_frames or 0)
+    source_total = logical_frame_count(timeline) or int(timeline.get("totalFrames") or total_frames or 0)
     export_max = int(
         (timeline.get("output") or {}).get("maxExportFrames")
         or (timeline.get("output") or {}).get("max_export_frames")
@@ -353,9 +341,24 @@ def build_director_plan(
     export_total = _resolve_export_total(timeline, source_total)
 
     load_timeline = _trim_timeline_for_export(timeline, export_total) if export_total < source_total else timeline
-    source_video = load_source_video_from_timeline(load_timeline)
-    loaded_h = int(source_video.shape[1])
-    loaded_w = int(source_video.shape[2])
+
+    clips = video_clips_from_timeline(load_timeline)
+    if not clips and not (load_timeline.get("video") or {}).get("frames"):
+        raise ValueError(
+            "No source video in Bernini Director. Upload a video inside the node timeline UI before running."
+        )
+
+    try:
+        probe = load_timeline_segment(load_timeline, 0, 1)
+        loaded_h = int(probe.shape[1])
+        loaded_w = int(probe.shape[2])
+    except Exception as exc:
+        log.warning("Could not probe source video frame: %s", exc)
+        video_meta = load_timeline.get("video") or {}
+        loaded_w = int(video_meta.get("width") or width)
+        loaded_h = int(video_meta.get("height") or height)
+
+    source_video = torch.zeros(0, max(1, loaded_h), max(1, loaded_w), 3)
     video_meta = timeline.get("video") or {}
     meta_w = int(video_meta.get("width") or 0)
     meta_h = int(video_meta.get("height") or 0)
@@ -371,11 +374,9 @@ def build_director_plan(
         fixed_height=int(output_block.get("height") or timeline.get("height") or height),
     )
 
-    total = int(load_timeline.get("totalFrames") or export_total or total_frames or source_video.shape[0] or 0)
+    total = int(load_timeline.get("totalFrames") or export_total or total_frames or 0)
     if total <= 0:
-        total = int(source_video.shape[0])
-    if source_video.shape[0] < total:
-        total = int(source_video.shape[0])
+        total = source_total
 
     segment_ranges = _segment_ranges_from_timeline(timeline, source_total or total)
     segment_ranges = _clip_segment_ranges(segment_ranges, total)
@@ -425,10 +426,11 @@ def build_director_plan(
         segments=segments,
         source_video=source_video,
         edit_mode=edit_mode,
-        raw=timeline,
+        raw=load_timeline,
         source_total_frames=source_total or total,
         export_max_frames=export_max,
         export_mode=export_mode,
+        run_indices=_parse_run_selection(timeline, len(segments)),
     )
 
 
@@ -451,8 +453,8 @@ def prepare_segment_clip(clip: torch.Tensor, target_frames: int) -> tuple[torch.
     return clip, num_frames
 
 
-# i2v uses source video context (frame0 image + gray tail); img0–img4 must not join context_latents.
-CONTEXT_REFERENCE_EXCLUDED_KEYS = frozenset({"i2v"})
+# v2v / i2v: source video only — reference images (image0–4) are not used in context_latents.
+CONTEXT_REFERENCE_EXCLUDED_KEYS = frozenset({"v2v", "i2v"})
 
 
 def segment_refs_for_context(task_key: str, refs: list[SegmentRef]) -> list[SegmentRef]:
@@ -500,6 +502,13 @@ def plan_summary(plan: DirectorPlan) -> str:
         )
     export_label = "分段导出" if plan.export_mode == "segments" else "全部导出"
     lines.append(f"Export mode: {export_label}")
+    if plan.run_indices is not None:
+        selected = sorted(plan.run_indices)
+        skipped = [i + 1 for i in range(plan.segment_count) if i not in plan.run_indices]
+        lines.append(
+            f"Run selection: {len(selected)}/{plan.segment_count} segment(s) "
+            f"(#{', #'.join(str(i + 1) for i in selected)}; skipped #{', #'.join(map(str, skipped)) or 'none'})"
+        )
     lines.append(f"Global task: {get_task_prompt_spec(plan.global_task_type).label}")
     for seg in plan.segments:
         lines.append(

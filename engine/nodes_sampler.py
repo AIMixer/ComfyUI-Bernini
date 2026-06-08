@@ -1,6 +1,8 @@
 # Copyright (c) 2025 kijai
 # Modified from the original work (https://github.com/kijai/ComfyUI-WanVideoWrapper)
+# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 # Licensed under the Apache License, Version 2.0
+
 import os, gc, math, copy
 import torch
 import numpy as np

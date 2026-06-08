@@ -253,6 +253,7 @@ def build_gen_director_plan(
         DirectorPlan,
         SegmentPlan,
         _load_refs,
+        _parse_run_selection,
         _resolve_export_mode,
         segment_refs_for_context,
     )
@@ -412,4 +413,5 @@ def build_gen_director_plan(
         edit_mode=edit_mode,
         raw=raw,
         export_mode=export_mode,
+        run_indices=_parse_run_selection(timeline, len(segments)),
     )

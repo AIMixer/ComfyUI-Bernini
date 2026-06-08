@@ -7,10 +7,12 @@ import {
     imageBatchRequiresFixedOutput,
     isPromptBatchTask,
     isVideoBatchTask,
+    MAX_GEN_FRAMES,
     minFrameCount,
     newBatchSegment,
     resolveTaskKey,
     sumFrameCounts,
+    taskUsesReferenceImages,
 } from "./bernini_gen_timeline.js";
 import {
     IMAGE_BATCH_STYLES,
@@ -22,13 +24,13 @@ import {
     renderImageBatchGroups,
     setImageBatchPreview,
     setToolbarDisabledForBatch,
+    wireBatchRunSelectControls,
 } from "./bernini_image_batch.js";
 
 const RULER_H = 24;
 const TRACK_H = 160;
 const MIN_SEG = 4;
 const HANDLE_PX = 14;
-const MAX_FRAMES = 512;
 const THUMB_MAX_W = 168;
 const THUMB_JPEG_Q = 0.55;
 const TIMELINE_SYNC_DEBOUNCE_MS = 500;
@@ -125,6 +127,14 @@ const STYLES = `
 .bd-btn{background:#222;color:#e0e0e0;border:1px solid #111;border-radius:4px;padding:6px 12px;font-size:11px;cursor:pointer}
 .bd-btn:hover{background:#333;border-color:#555}
 .bd-btn-danger:hover{background:#4a1515;border-color:#c44;color:#faa}
+.bd-btn-sm{padding:3px 8px;font-size:10px}
+.bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
+.bd-run-select-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#aaa}
+.bd-run-select-all-wrap{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none;margin-left:2px}
+.bd-run-select-all-wrap.hidden{display:none!important}
+.bd-run-select-all-wrap input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
+.bd-run-select-bar.hidden{display:none!important}
+.bd-batch-run-check{margin-right:6px;width:14px;height:14px;cursor:pointer;accent-color:#4fff8f;flex-shrink:0}
 .bd-btn-primary{background:#1a3a2a;border-color:#4fff8f;color:#4fff8f}
 .bd-mode{display:flex;border:1px solid #333;border-radius:4px;overflow:hidden}
 .bd-mode button{border:none;background:#222;color:#aaa;padding:6px 12px;font-size:11px;cursor:pointer}
@@ -300,6 +310,23 @@ function refViewUrl(imageFile) {
     return inputViewUrl(imageFile, "input");
 }
 
+function deletedSourceRanges(video) {
+    return video?.deletedSourceRanges || video?.deleted_source_ranges || [];
+}
+
+function logicalToSourceFrame(logical, video) {
+    const map = video?.frameMap;
+    if (map?.length) {
+        return normalizeFrameMapEntry(map[clamp(logical, 0, map.length - 1)]).frame;
+    }
+    let src = logical;
+    for (const [start, end] of [...deletedSourceRanges(video)].sort((a, b) => a[0] - b[0])) {
+        if (src >= start) src += end - start;
+        else break;
+    }
+    return src;
+}
+
 function buildIdentityFrameMap(count) {
     return Array.from({ length: count }, (_, i) => i);
 }
@@ -404,6 +431,8 @@ function parseTimeline(raw, totalFrames, fps) {
         videoClips: [],
         global: { taskType: "", prompt: "", refs: [] },
         output: { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" },
+        runSelectEnabled: false,
+        runSelection: [],
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }],
     };
     if (!raw?.trim()) return base;
@@ -429,17 +458,14 @@ function parseTimeline(raw, totalFrames, fps) {
         };
         const legacyFrames = data.video.frames?.length || 0;
         if (!data.video.frameMap?.length) {
-            const n = data.totalFrames || legacyFrames || total;
-            if (data.video.videoFile) {
-                data.video.frameMap = buildIdentityFrameMap(n);
-            } else if (legacyFrames) {
-                data.video.frameMap = buildIdentityFrameMap(legacyFrames);
-            } else {
-                data.video.frameMap = [];
-            }
+            const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
+            data.totalFrames = n;
+            data.video.sourceFrameCount = data.video.sourceFrameCount || n;
+            data.video.deletedSourceRanges = data.video.deletedSourceRanges || [];
+            data.video.frameMap = [];
         }
         if (!data.segments?.length) {
-            const n = data.video.frameMap.length || data.totalFrames || total;
+            const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
             data.segments = [{ id: uid(), start: 0, length: Math.max(MIN_SEG, n), prompt: "", taskType: "", refs: [] }];
         }
         for (const seg of data.segments) {
@@ -454,6 +480,8 @@ function parseTimeline(raw, totalFrames, fps) {
         if (data.global) {
             data.global.genImage = data.global.genImage || { imageFile: data.global.imageFile || "" };
         }
+        data.runSelectEnabled = !!data.runSelectEnabled;
+        data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
         if (data.timelineMode === "image_batch" || data.timelineMode === "prompt_batch") {
             data.timelineMode = "prompt_batch";
             data.editMode = "segment";
@@ -485,7 +513,7 @@ function parseTimeline(raw, totalFrames, fps) {
             }];
         }
         data.videoClips = data.videoClips || [];
-        data.totalFrames = data.video.frameMap.length || data.totalFrames || total;
+        data.totalFrames = data.totalFrames || data.video.sourceFrameCount || data.video.frameMap?.length || total;
         return data;
     } catch {
         return base;
@@ -671,6 +699,7 @@ class BerniniDirectorEditor {
                     refs: s.refs || [],
                     genImage: s.genImage || { imageFile: "" },
                 })),
+                ...this._runSelectionPayload(),
             };
         }
         if (this.isGenMode()) {
@@ -694,23 +723,38 @@ class BerniniDirectorEditor {
                     ...s,
                     frameCount: s.frameCount ?? s.length,
                 })),
+                ...this._runSelectionPayload(),
             };
         }
         const video = { ...(this.timeline.video || {}) };
-        const frameMap = this.getFrameMap();
+        const frameMap = video.frameMap?.length ? video.frameMap : [];
+        const src = this.getSourceDimensions();
+        const resolved = resolveOutputDimensions(src.width, src.height, this.timeline.output || {}, {
+            refMaxSize: this.refMaxWidget?.value,
+        });
+        const storageW = resolved.width || video.storageWidth || this._storageWidth;
+        const storageH = resolved.height || video.storageHeight || this._storageHeight;
+        const clips = this.getVideoClips().map((c) => ({
+            ...c,
+            storageWidth: storageW,
+            storageHeight: storageH,
+        }));
         return {
             ...this.timeline,
             version: 4,
             timelineMode: "video",
-            totalFrames: frameMap.length,
-            videoClips: this.getVideoClips(),
+            totalFrames: this.getTotalFrames(),
+            videoClips: clips,
             video: {
                 ...video,
                 frameMap,
+                sourceFrameCount: video.sourceFrameCount || this.getTotalFrames(),
+                deletedSourceRanges: video.deletedSourceRanges || [],
                 frames: this._legacyFrames.length ? this._legacyFrames : [],
-                storageWidth: video.storageWidth ?? this._storageWidth,
-                storageHeight: video.storageHeight ?? this._storageHeight,
+                storageWidth: storageW,
+                storageHeight: storageH,
             },
+            ...this._runSelectionPayload(),
         };
     }
 
@@ -750,6 +794,11 @@ class BerniniDirectorEditor {
                 <button type="button" class="bd-btn" data-a="split">+ 分割</button>
                 <input type="number" class="bd-num" data-r="equal-n" min="2" max="64" value="2" title="均分段数">
                 <button type="button" class="bd-btn" data-a="equal">均分</button>
+                <button type="button" class="bd-btn" data-a="run-select-toggle" title="开启后可勾选要运行的片段/提示词组；关闭时运行全部">选择运行</button>
+                <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" title="勾选=全选，取消=全部不选；仍可在各片段上单独勾选">
+                    <input type="checkbox" data-r="run-select-all-cb">
+                    <span>全选</span>
+                </label>
                 <button type="button" class="bd-btn bd-btn-danger" data-a="del" title="删除选中片段并裁剪视频，时间轴自动衔接">删除片段</button>
                 <div class="bd-mode">
                     <button type="button" data-a="mode-global" class="active">全局模式</button>
@@ -840,7 +889,7 @@ class BerniniDirectorEditor {
                 </div>
                 <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
                     <span class="bd-label">默认片段帧数</span>
-                    <input type="number" class="bd-num" data-r="gen-default-fc" min="1" max="512" value="81" style="width:72px">
+                    <input type="number" class="bd-num" data-r="gen-default-fc" min="1" max="${MAX_GEN_FRAMES}" value="81" style="width:72px">
                 </div>
             </div>
             <div class="bd-panel" data-r="segment-panel" style="display:none">
@@ -861,7 +910,7 @@ class BerniniDirectorEditor {
                 </div>
                 <div class="bd-gen-fc-row hidden" data-r="gen-seg-fc-row">
                     <span class="bd-label">片段帧数</span>
-                    <input type="number" class="bd-num" data-r="gen-seg-fc" min="1" max="512" value="81" style="width:72px">
+                    <input type="number" class="bd-num" data-r="gen-seg-fc" min="1" max="${MAX_GEN_FRAMES}" value="81" style="width:72px">
                 </div>
             </div>`;
         this.mainBody.appendChild(bottom);
@@ -872,6 +921,7 @@ class BerniniDirectorEditor {
         this.batchHint = batchUi.hint;
         this.batchI2vNotice = batchUi.i2vNotice;
         this.batchAddBtn = batchUi.addBtn;
+        wireBatchRunSelectControls(this, batchUi);
 
         const runStatus = document.createElement("div");
         runStatus.className = "bd-run-status idle";
@@ -879,6 +929,9 @@ class BerniniDirectorEditor {
         runStatus.innerHTML = `
             <div class="bd-run-title" data-r="run-title">运行状态：待命</div>
             <div class="bd-run-detail" data-r="run-detail">队列执行时将显示当前片段与阶段进度</div>
+            <div class="bd-run-select-bar hidden" data-r="run-select-bar">
+                <span data-r="run-select-summary">将运行全部片段</span>
+            </div>
             <div class="bd-run-bars">
                 <div class="bd-run-bar" title="整体进度"><div class="bd-run-bar-fill" data-r="run-overall" style="width:0%"></div></div>
                 <div class="bd-run-bar bd-run-bar-sub" title="当前阶段"><div class="bd-run-bar-fill" data-r="run-phase" style="width:0%"></div></div>
@@ -906,6 +959,7 @@ class BerniniDirectorEditor {
         this.zoomSlider = this.root.querySelector('[data-r="zoom"]');
         this.globalTask = this.root.querySelector('[data-r="global-task"]');
         this.globalPanel = this.root.querySelector('[data-r="global-panel"]');
+        this.globalPanelTitle = this.globalPanel?.querySelector("b");
         this.segmentPanel = this.root.querySelector('[data-r="segment-panel"]');
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
@@ -941,6 +995,11 @@ class BerniniDirectorEditor {
         this.runDetailEl = this.root.querySelector('[data-r="run-detail"]');
         this.runOverallEl = this.root.querySelector('[data-r="run-overall"]');
         this.runPhaseEl = this.root.querySelector('[data-r="run-phase"]');
+        this.runSelectBar = this.root.querySelector('[data-r="run-select-bar"]');
+        this.runSelectSummary = this.root.querySelector('[data-r="run-select-summary"]');
+        this.btnRunSelectToggle = this.root.querySelector('[data-a="run-select-toggle"]');
+        this.runSelectAllWrap = this.root.querySelector('[data-r="run-select-all-wrap"]');
+        this.runSelectAllCb = this.root.querySelector('[data-r="run-select-all-cb"]');
 
         this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value);
         this.syncNegativeFromWidget();
@@ -972,6 +1031,7 @@ class BerniniDirectorEditor {
         bind('[data-a="video-append"]', () => this.pickAppendVideoFile());
         bind('[data-a="split"]', () => this.splitAtFrame(this.currentFrame));
         bind('[data-a="equal"]', () => this.equalSplit());
+        bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
@@ -982,6 +1042,13 @@ class BerniniDirectorEditor {
 
         this.seekBar.oninput = () => { this.currentFrame = +this.seekBar.value; this.scheduleRender(); };
         this.zoomSlider.oninput = () => { this.zoom = +this.zoomSlider.value; this.applyZoomWidth(); this.scheduleRender(); };
+        if (this.runSelectAllCb) {
+            this.runSelectAllCb.onchange = (e) => {
+                stopDomEvent(e);
+                if (!this.isRunSelectEnabled()) return;
+                this.setRunSelectionAll(this.runSelectAllCb.checked);
+            };
+        }
         this.globalTask.onchange = () => this.onGlobalField("taskType", this.globalTask.value);
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
         this.segPrompt.oninput = () => this.onSegField("prompt", this.segPrompt.value);
@@ -1119,6 +1186,135 @@ class BerniniDirectorEditor {
         return resolveTaskKey(this.globalTask?.value || this.taskTypeWidget?.value);
     }
 
+    getRunnableSegmentCount() {
+        return this.timeline.segments?.length || 0;
+    }
+
+    supportsRunSelect() {
+        const n = this.getRunnableSegmentCount();
+        if (n < 2) return false;
+        const mode = this.getDirectorMode();
+        if (mode === "video") return true;
+        if (this.isImageBatch()) return isPromptBatchTask(this.getTaskKey());
+        return false;
+    }
+
+    getRunProgressSegmentTotal() {
+        const n = this.getRunnableSegmentCount();
+        if (!this.isRunSelectEnabled() || n < 2) return Math.max(n, 1);
+        const count = (this.timeline.runSelection || []).length;
+        return count > 0 ? count : Math.max(n, 1);
+    }
+
+    isRunSelectEnabled() {
+        return !!this.timeline.runSelectEnabled;
+    }
+
+    normalizeRunSelection() {
+        const n = this.getRunnableSegmentCount();
+        if (!this.isRunSelectEnabled() || n < 1) return;
+        this.timeline.runSelection = [...new Set(
+            (this.timeline.runSelection || []).filter((i) => i >= 0 && i < n),
+        )].sort((a, b) => a - b);
+    }
+
+    isSegmentRunEnabled(index) {
+        if (!this.isRunSelectEnabled()) return true;
+        return (this.timeline.runSelection || []).includes(index);
+    }
+
+    toggleSegmentRun(index) {
+        if (!this.isRunSelectEnabled()) return;
+        const n = this.getRunnableSegmentCount();
+        if (index < 0 || index >= n) return;
+        const sel = new Set(this.timeline.runSelection || []);
+        if (sel.has(index)) sel.delete(index);
+        else sel.add(index);
+        this.timeline.runSelection = [...sel].sort((a, b) => a - b);
+        this.updateRunSelectUI();
+        this.commit(false, { syncTimeline: true });
+        if (this.isImageBatch()) this.renderImageBatchGroups();
+        else this.scheduleRender();
+    }
+
+    toggleRunSelectMode() {
+        if (!this.supportsRunSelect()) return;
+        const n = this.getRunnableSegmentCount();
+        this.timeline.runSelectEnabled = !this.timeline.runSelectEnabled;
+        if (this.timeline.runSelectEnabled) {
+            if (!(this.timeline.runSelection || []).length) {
+                this.timeline.runSelection = Array.from({ length: n }, (_, i) => i);
+            } else {
+                this.normalizeRunSelection();
+            }
+        }
+        this.updateRunSelectUI();
+        this.commit(false, { syncTimeline: true });
+        if (this.isImageBatch()) this.renderImageBatchGroups();
+        else this.scheduleRender();
+    }
+
+    setRunSelectionAll(on) {
+        if (!this.isRunSelectEnabled()) return;
+        const n = this.getRunnableSegmentCount();
+        this.timeline.runSelection = on ? Array.from({ length: n }, (_, i) => i) : [];
+        this.updateRunSelectUI();
+        this.commit(false, { syncTimeline: true });
+        if (this.isImageBatch()) this.renderImageBatchGroups();
+        else this.scheduleRender();
+    }
+
+    updateRunSelectUI() {
+        const n = this.getRunnableSegmentCount();
+        const canRunSelect = this.supportsRunSelect();
+        const enabled = this.isRunSelectEnabled() && canRunSelect;
+        const useBatchBar = this.isImageBatch() && canRunSelect;
+        this.btnRunSelectToggle?.classList.toggle("active", enabled);
+        this.btnRunSelectToggle?.classList.toggle("bd-btn-run-select", true);
+        this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
+        this.batchRunSelectBtn?.classList.toggle("active", enabled);
+        this.batchRunSelectBtn?.classList.toggle("hidden", !useBatchBar);
+        this.runSelectAllWrap?.classList.toggle("hidden", !enabled || useBatchBar);
+        this.batchRunSelectAllWrap?.classList.toggle("hidden", !enabled || !useBatchBar);
+        this.runSelectBar?.classList.toggle("hidden", !enabled);
+        if (!canRunSelect) return;
+        this.normalizeRunSelection();
+        const count = (this.timeline.runSelection || []).length;
+        const syncAllCb = (cb) => {
+            if (!cb) return;
+            cb.checked = count >= n && n > 0;
+            cb.indeterminate = count > 0 && count < n;
+        };
+        syncAllCb(this.runSelectAllCb);
+        syncAllCb(this.batchRunSelectAllCb);
+        const label = this.isImageBatch() ? "组" : "段";
+        if (!this.runSelectSummary) return;
+        if (!count) {
+            this.runSelectSummary.textContent = `未勾选任何${label}（无法运行）`;
+            this.runSelectSummary.style.color = "#f88";
+        } else if (count >= n) {
+            this.runSelectSummary.textContent = `将运行全部 ${n} ${label}`;
+            this.runSelectSummary.style.color = "#aaa";
+        } else {
+            const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
+            this.runSelectSummary.textContent = count === 1
+                ? `将运行 1 ${label}（#${nums}）`
+                : `将运行 ${count} ${label}（#${nums}）`;
+            this.runSelectSummary.style.color = "#4fff8f";
+        }
+    }
+
+    _runSelectionPayload() {
+        if (!this.timeline.runSelectEnabled) {
+            return { runSelectEnabled: false, runSelection: [] };
+        }
+        this.normalizeRunSelection();
+        return {
+            runSelectEnabled: true,
+            runSelection: [...(this.timeline.runSelection || [])],
+        };
+    }
+
     getDirectorMode() {
         return getDirectorMode(this.globalTask?.value || this.taskTypeWidget?.value);
     }
@@ -1174,7 +1370,7 @@ class BerniniDirectorEditor {
         let start = 0;
         const fixed = [];
         for (const seg of [...this.timeline.segments]) {
-            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key), minFc, 512);
+            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key), minFc, MAX_GEN_FRAMES);
             fixed.push({
                 ...seg,
                 start,
@@ -1195,6 +1391,27 @@ class BerniniDirectorEditor {
         this.timeline.segments = fixed;
         this.timeline.totalFrames = start || fixed[0].frameCount;
         this.selectedIndex = clamp(this.selectedIndex, 0, fixed.length - 1);
+    }
+
+    updateReferenceImageVisibility({ hideTimeline = false, seg = null } = {}) {
+        const globalKey = this.getTaskKey();
+        const showGlobalRefs = !hideTimeline && taskUsesReferenceImages(globalKey);
+        this.globalRefsCol?.classList.toggle("hidden", !showGlobalRefs);
+        this.globalRefsBox?.classList.toggle("hidden", !showGlobalRefs);
+        this.globalRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showGlobalRefs);
+        if (this.globalPanelTitle) {
+            this.globalPanelTitle.textContent = showGlobalRefs
+                ? "全局提示词 & 参考图 (image0–4)"
+                : "全局提示词";
+        }
+
+        const segKey = resolveTaskKey(
+            seg?.taskType || this.timeline.global?.taskType || this.globalTask?.value || globalKey,
+        );
+        const showSegRefs = !hideTimeline && taskUsesReferenceImages(segKey);
+        this.segRefsCol?.classList.toggle("hidden", !showSegRefs);
+        this.segRefsBox?.classList.toggle("hidden", !showSegRefs);
+        this.segRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showSegRefs);
     }
 
     applyTaskLayout(prevMode) {
@@ -1253,11 +1470,7 @@ class BerniniDirectorEditor {
         this.batchPanel?.classList.toggle("hidden", !isBatch);
         setToolbarDisabledForBatch(this, isBatch);
 
-        const showRefs = !hideTimeline;
-        this.globalRefsBox?.classList.toggle("hidden", !showRefs);
-        this.segRefsBox?.classList.toggle("hidden", !showRefs);
-        this.globalRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showRefs);
-        this.segRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showRefs);
+        this.updateReferenceImageVisibility({ hideTimeline });
 
         const showGenImg = mode === "gen_image";
         this.genGlobalImg?.classList.toggle("hidden", !showGenImg || !this.isGlobalMode());
@@ -1327,6 +1540,7 @@ class BerniniDirectorEditor {
         this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
         if (!isBatch) this.scheduleRender();
         this.scheduleTimelineSync();
+        this.updateRunSelectUI();
     }
 
     renderGenSrcSlot(el, imageFile, label) {
@@ -1369,7 +1583,7 @@ class BerniniDirectorEditor {
     }
 
     onGenDefaultFcChange() {
-        const fc = clamp(parseInt(this.genDefaultFc?.value, 10) || 1, minFrameCount(this.getTaskKey()), 512);
+        const fc = clamp(parseInt(this.genDefaultFc?.value, 10) || 1, minFrameCount(this.getTaskKey()), MAX_GEN_FRAMES);
         if (this.genDefaultFc) this.genDefaultFc.value = fc;
         this.timeline.gen = this.timeline.gen || {};
         this.timeline.gen.defaultFrameCount = fc;
@@ -1384,7 +1598,7 @@ class BerniniDirectorEditor {
         const seg = this.timeline.segments[this.selectedIndex];
         if (!seg) return;
         const minFc = minFrameCount(this.getTaskKey());
-        seg.frameCount = clamp(parseInt(this.genSegFc?.value, 10) || minFc, minFc, 512);
+        seg.frameCount = clamp(parseInt(this.genSegFc?.value, 10) || minFc, minFc, MAX_GEN_FRAMES);
         if (this.genSegFc) this.genSegFc.value = seg.frameCount;
         this.commit();
     }
@@ -1485,8 +1699,8 @@ class BerniniDirectorEditor {
 
     getFrameMapEntry(logicalFrame) {
         const map = this.getFrameMap();
-        if (!map.length) return { clip: 0, frame: logicalFrame };
-        return normalizeFrameMapEntry(map[clamp(logicalFrame, 0, map.length - 1)]);
+        if (map.length) return normalizeFrameMapEntry(map[clamp(logicalFrame, 0, map.length - 1)]);
+        return { clip: 0, frame: logicalToSourceFrame(logicalFrame, this.timeline.video || {}) };
     }
 
     getSegmentClipIndex(seg) {
@@ -1597,6 +1811,9 @@ class BerniniDirectorEditor {
         if (toRank < 0 || toRank >= ordered.length) return;
         if (fromRank === toRank) return;
 
+        if (!this.getFrameMap().length && this.getTotalFrames() > 0) {
+            this.materializeFrameMap();
+        }
         const map = [...this.getFrameMap()];
         const slices = ordered.map((o) => map.slice(o.seg.start, o.seg.start + o.seg.length));
         const metas = ordered.map((o) => ({
@@ -1628,6 +1845,18 @@ class BerniniDirectorEditor {
         this._prefetchSegmentThumbs(0, Math.min(newMap.length, THUMB_PREFETCH_BATCH * 4));
     }
 
+    materializeFrameMap() {
+        const total = this.getTotalFrames();
+        const video = this.timeline.video || {};
+        if (video.frameMap?.length === total) return;
+        const map = [];
+        for (let i = 0; i < total; i++) map.push(this.getFrameMapEntry(i));
+        video.frameMap = map;
+        video.deletedSourceRanges = [];
+        this.timeline.video = video;
+        this.timeline.totalFrames = total;
+    }
+
     getFrameMap() {
         const v = this.timeline?.video || {};
         if (v.frameMap?.length) return v.frameMap;
@@ -1639,15 +1868,37 @@ class BerniniDirectorEditor {
     setFrameMap(map) {
         this.timeline.video = this.timeline.video || {};
         this.timeline.video.frameMap = map;
-        this.timeline.totalFrames = map.length;
+        if (map.length) {
+            this.timeline.totalFrames = map.length;
+            this.timeline.video.deletedSourceRanges = [];
+        }
+    }
+
+    setSparseVideoFrames(totalFrames) {
+        this.timeline.video = this.timeline.video || {};
+        this.timeline.video.frameMap = [];
+        this.timeline.video.sourceFrameCount = totalFrames;
+        this.timeline.video.deletedSourceRanges = [];
+        this.timeline.totalFrames = totalFrames;
+    }
+
+    logicalToSourceFrame(logical) {
+        return logicalToSourceFrame(logical, this.timeline.video || {});
     }
 
     getTotalFrames() {
         if (this.isImageBatch() || this.isGenMode()) return sumFrameCounts(this.timeline.segments);
-        const mapLen = this.getFrameMap().length;
+        const mapLen = this.timeline?.video?.frameMap?.length || 0;
         if (mapLen > 0) return mapLen;
+        const total = Math.max(0, parseInt(this.timeline?.totalFrames || this.totalFramesWidget?.value || 0, 10));
+        if (total > 0) return total;
         if (!this.hasVideo()) return 0;
-        return Math.max(0, parseInt(this.totalFramesWidget?.value || this.timeline.totalFrames || 0, 10));
+        const src = parseInt(this.timeline?.video?.sourceFrameCount || 0, 10);
+        if (src > 0) {
+            const removed = deletedSourceRanges(this.timeline.video).reduce((s, [a, b]) => s + (b - a), 0);
+            return Math.max(0, src - removed);
+        }
+        return 0;
     }
 
     getMaxExportFrames() {
@@ -1720,11 +1971,29 @@ class BerniniDirectorEditor {
     }
 
     getSourceDimensions() {
-        const video = this.timeline.video || {};
+        const clips = this.getVideoClips?.() || [];
+        const video = clips[0] || this.timeline.video || {};
+        if (+(video.width || 0) > 0 && +(video.height || 0) > 0) {
+            return { width: +video.width, height: +video.height };
+        }
         return {
-            width: video.width || this.timeline.width || this.widthWidget?.value || 832,
-            height: video.height || this.timeline.height || this.heightWidget?.value || 480,
+            width: this.timeline.width || this.widthWidget?.value || 832,
+            height: this.timeline.height || this.heightWidget?.value || 480,
         };
+    }
+
+    _refreshVideoStorageDimensions(resolved) {
+        if (!resolved?.width || !resolved?.height) return;
+        this._storageWidth = resolved.width;
+        this._storageHeight = resolved.height;
+        if (this.timeline.video) {
+            this.timeline.video.storageWidth = resolved.width;
+            this.timeline.video.storageHeight = resolved.height;
+        }
+        for (const clip of this.getVideoClips()) {
+            clip.storageWidth = resolved.width;
+            clip.storageHeight = resolved.height;
+        }
     }
 
     syncOutputUIFromTimeline() {
@@ -1867,8 +2136,8 @@ class BerniniDirectorEditor {
         this.timeline.output = {
             mode: resolved.mode,
             longEdge: this.timeline.output?.longEdge ?? resolved.refMaxSize,
-            width: this.timeline.output?.width ?? resolved.width,
-            height: this.timeline.output?.height ?? resolved.height,
+            width: resolved.width,
+            height: resolved.height,
             maxExportFrames: this.timeline.output?.maxExportFrames ?? 0,
             exportMode: this.timeline.output?.exportMode ?? "all",
         };
@@ -1878,6 +2147,7 @@ class BerniniDirectorEditor {
         this.timeline.width = resolved.width;
         this.timeline.height = resolved.height;
         this.timeline.refMaxSize = resolved.refMaxSize;
+        this._refreshVideoStorageDimensions(resolved);
         this.updateOutputPreview();
     }
 
@@ -1894,6 +2164,8 @@ class BerniniDirectorEditor {
     commit(skipRender = false, { syncTimeline = true } = {}) {
         this.syncFromWidgets();
         this.normalizeSegments();
+        if (this.isRunSelectEnabled()) this.normalizeRunSelection();
+        this.updateRunSelectUI();
         if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
         if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
         if (this.negativePromptWidget) {
@@ -1904,8 +2176,9 @@ class BerniniDirectorEditor {
         this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
         if (syncTimeline) this.scheduleTimelineSync();
         if (!skipRender) this.scheduleRender();
-        if (this.isGlobalMode()) this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
-        else if (this.isImageBatch()) this.renderImageBatchGroups();
+        if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
+            this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
+        } else if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.updateSelectionUI();
     }
 
@@ -2132,7 +2405,7 @@ class BerniniDirectorEditor {
         }
 
         this._restorePreviewVideos();
-        const n = this.getFrameMap().length;
+        const n = this.getTotalFrames();
         this._prefetchSegmentThumbs(0, Math.min(n, THUMB_PREFETCH_BATCH * 4));
         this.updateVideoNameLabel();
     }
@@ -2355,15 +2628,13 @@ class BerniniDirectorEditor {
         const meta = await this.probeVideoMetadata(viewUrl);
 
         const fps = this.getFrameRate();
-        const requested = Math.max(1, Math.round(meta.duration * fps));
-        const totalFrames = Math.min(requested, MAX_FRAMES);
-        const trimNote = totalFrames < requested ? ` · 已截取前 ${totalFrames} 帧` : "";
+        const totalFrames = Math.max(1, Math.round(meta.duration * fps));
 
         const store = resolveOutputDimensions(meta.width, meta.height, this.timeline.output || { mode: "long_edge", longEdge: 848 }, {
             refMaxSize: this.refMaxWidget?.value,
         });
 
-        return { fileName, relPath, subfolder, type, meta, totalFrames, store, trimNote, viewUrl };
+        return { fileName, relPath, subfolder, type, meta, totalFrames, store, viewUrl };
     }
 
     _buildClipRecord({ fileName, relPath, subfolder, type, meta, totalFrames, store }) {
@@ -2394,16 +2665,15 @@ class BerniniDirectorEditor {
 
     async _applyLoadedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
         const prep = await this._prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix });
-        const { totalFrames, store, trimNote, viewUrl } = prep;
+        const { totalFrames, store, viewUrl } = prep;
 
         this._storageWidth = store.width;
         this._storageHeight = store.height;
-        const frameMap = buildIdentityFrameMap(totalFrames);
         const clip = this._buildClipRecord(prep);
 
         this.timeline.videoClips = [clip];
-        this.setFrameMap(frameMap);
-        this._syncPrimaryVideoFromClips(frameMap);
+        this.setSparseVideoFrames(totalFrames);
+        this._syncPrimaryVideoFromClips([]);
         this._setSingleSegment(totalFrames);
 
         this._clearPreviewVideos(true);
@@ -2413,14 +2683,13 @@ class BerniniDirectorEditor {
         if (this.totalFramesWidget) this.totalFramesWidget.value = totalFrames;
         this.syncOutputUIFromTimeline();
         this.updateVideoNameLabel();
-        if (trimNote) this.videoNameEl.textContent += trimNote;
         this._prefetchSegmentThumbs(0, Math.min(totalFrames, THUMB_PREFETCH_BATCH * 4));
         this.commit(false, { syncTimeline: true });
     }
 
     async _applyAppendedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
         const prep = await this._prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix });
-        const { totalFrames, store, trimNote } = prep;
+        const { totalFrames, store } = prep;
 
         this._ensureVideoClipsArray();
         const clipIndex = this.timeline.videoClips.length;
@@ -2428,9 +2697,13 @@ class BerniniDirectorEditor {
         this.timeline.videoClips.push(clip);
 
         const prevTotal = this.getTotalFrames();
+        if (!this.getFrameMap().length && prevTotal > 0) {
+            this.materializeFrameMap();
+        }
         const newEntries = buildClipFrameMap(clipIndex, totalFrames);
         const map = [...this.getFrameMap(), ...newEntries];
         this.setFrameMap(map);
+        this.timeline.totalFrames = map.length;
         this._syncPrimaryVideoFromClips(map);
 
         this._getPreviewVideoForClip(clipIndex);
@@ -2456,7 +2729,6 @@ class BerniniDirectorEditor {
         this.normalizeSegments();
         this.syncOutputUIFromTimeline();
         this.updateVideoNameLabel();
-        if (trimNote) this.videoNameEl.textContent += trimNote;
         this._prefetchSegmentThumbs(prevTotal, Math.min(prevTotal + totalFrames, prevTotal + THUMB_PREFETCH_BATCH * 4));
         this.commit(false, { syncTimeline: true });
     }
@@ -2472,8 +2744,8 @@ class BerniniDirectorEditor {
             video.onerror = () => rej(new Error("无法读取视频元数据"));
         });
         return {
-            width: video.videoWidth || 832,
-            height: video.videoHeight || 480,
+            width: video.videoWidth || 0,
+            height: video.videoHeight || 0,
             duration: video.duration || 0,
         };
     }
@@ -2534,6 +2806,15 @@ class BerniniDirectorEditor {
             return { type: "ruler" };
         }
 
+        if (this.isRunSelectEnabled() && segs.length >= 2) {
+            for (let i = segs.length - 1; i >= 0; i--) {
+                const x0 = this.frameToX(segs[i].start, width);
+                if (x >= x0 + 3 && x <= x0 + 19 && y >= RULER_H + 3 && y <= RULER_H + 19) {
+                    return { type: "run-check", index: i };
+                }
+            }
+        }
+
         for (let i = segs.length - 1; i >= 0; i--) {
             const seg = segs[i];
             const x0 = this.frameToX(seg.start, width);
@@ -2564,6 +2845,8 @@ class BerniniDirectorEditor {
         if (hit.type === "playhead" || hit.type === "ruler") {
             this.currentFrame = this.xToFrame(x, width);
             this._drag = { kind: "playhead" };
+        } else if (hit.type === "run-check") {
+            this.toggleSegmentRun(hit.index);
         } else if (hit.type === "segment") {
             this.selectedIndex = hit.index;
             this.updateSelectionUI();
@@ -2731,14 +3014,26 @@ class BerniniDirectorEditor {
         this.timeline.segments.splice(idx, 1);
 
         const map = [...this.getFrameMap()];
+        let total;
         if (len > 0 && map.length) {
             map.splice(start, len);
+            this.setFrameMap(map);
+            total = map.length;
+        } else if (len > 0) {
+            const video = this.timeline.video || {};
+            video.deletedSourceRanges = video.deletedSourceRanges || [];
+            const srcStart = this.logicalToSourceFrame(start);
+            video.deletedSourceRanges.push([srcStart, srcStart + len]);
+            video.deletedSourceRanges.sort((a, b) => a[0] - b[0]);
+            total = Math.max(0, this.getTotalFrames() - len);
+            this.timeline.totalFrames = total;
+            this.timeline.video = video;
+        } else {
+            total = this.getTotalFrames();
         }
-        this.setFrameMap(map);
         this._thumbCache.clear();
         this._thumbPending.clear();
 
-        const total = map.length;
         if (this.totalFramesWidget) this.totalFramesWidget.value = total;
 
         this.compactSegmentsAfterDelete();
@@ -2901,6 +3196,24 @@ class BerniniDirectorEditor {
         ctx.restore();
     }
 
+    _drawSegmentRunCheck(x, y, enabled) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.fillStyle = enabled ? "#1a3a2a" : "#111";
+        ctx.strokeStyle = enabled ? "#4fff8f" : "#666";
+        ctx.lineWidth = 1;
+        ctx.fillRect(x, y, 14, 14);
+        ctx.strokeRect(x + 0.5, y + 0.5, 13, 13);
+        if (enabled) {
+            ctx.fillStyle = "#4fff8f";
+            ctx.font = "11px sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "alphabetic";
+            ctx.fillText("✓", x + 2, y + 11);
+        }
+        ctx.restore();
+    }
+
     drawPromptOverlay(ctx, seg, startX, pxWidth, y0, h) {
         const prompt = this.getDisplayPrompt(seg);
         if (!prompt || pxWidth < 24) return;
@@ -2971,11 +3284,22 @@ class BerniniDirectorEditor {
         this.ctx.fillRect(0, 0, width, RULER_H);
         this.ctx.fillStyle = "#888";
         this.ctx.font = "10px sans-serif";
-        for (let s = 0; s * fps <= total; s += Math.max(1, Math.floor(total / fps / 10))) {
-            const f = Math.round(s * fps);
+        const durationSec = total / Math.max(fps, 0.001);
+        const stepSec = Math.max(1, durationSec / 10);
+        for (let s = 0; s < durationSec; s += stepSec) {
+            const f = Math.min(total - 1, Math.round(s * fps));
             const x = this.frameToX(f, width);
             this.ctx.fillRect(x, RULER_H - 6, 1, 6);
-            this.ctx.fillText(`${s.toFixed(0)}.00`, x + 2, 11);
+            const label = Math.abs(s - Math.round(s)) < 0.01 ? `${Math.round(s)}.00` : s.toFixed(1);
+            this.ctx.fillText(label, x + 2, 11);
+        }
+        if (total > 0) {
+            const endF = total - 1;
+            const endX = this.frameToX(endF, width);
+            this.ctx.fillRect(endX, RULER_H - 6, 1, 6);
+            const endLabel = durationSec.toFixed(2);
+            const textW = this.ctx.measureText(endLabel).width;
+            this.ctx.fillText(endLabel, Math.max(2, endX - textW - 2), 11);
         }
 
         this.ctx.fillStyle = "#111";
@@ -3006,11 +3330,17 @@ class BerniniDirectorEditor {
             const pxW = x1 - x0;
             const sel = i === this.selectedIndex;
             const running = i === this._runHighlightSeg;
-            if (reordering && this._visualRankFromArrayIndex(i) === dragFromRank) {
+            const runOn = this.isSegmentRunEnabled(i);
+            if (this.isRunSelectEnabled() && segs.length >= 2 && !runOn) {
+                this.ctx.globalAlpha = 0.32;
+            } else if (reordering && this._visualRankFromArrayIndex(i) === dragFromRank) {
                 this.ctx.globalAlpha = 0.38;
             }
             this.drawSegmentThumbnails(this.ctx, seg, x0, pxW, RULER_H, TRACK_H);
             this.drawPromptOverlay(this.ctx, seg, x0, pxW, RULER_H, TRACK_H);
+            if (this.isRunSelectEnabled() && segs.length >= 2) {
+                this._drawSegmentRunCheck(x0 + 5, RULER_H + 5, runOn);
+            }
             const clipIdx = this.getSegmentClipIndex(seg);
             const clipColor = CLIP_SEGMENT_COLORS[clipIdx % CLIP_SEGMENT_COLORS.length];
             this.ctx.strokeStyle = running ? "#4fff8f" : sel ? "#fff" : clipColor;
@@ -3078,7 +3408,14 @@ class BerniniDirectorEditor {
         if (this.globalTask) this.globalTask.value = this.timeline.global.taskType || "";
         if (this.globalPrompt) this.globalPrompt.value = this.timeline.global.prompt || "";
         this.syncNegativeFromWidget();
-        this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
+
+        const hideTimeline = this.isImageBatch() || this.isGenMode();
+        const seg = this.isGlobalMode() ? null : this.timeline.segments[this.selectedIndex];
+        this.updateReferenceImageVisibility({ hideTimeline, seg: seg || null });
+
+        if (taskUsesReferenceImages(this.getTaskKey())) {
+            this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
+        }
         if (this.isGenImage() && this.isGlobalMode()) {
             this.renderGenSrcSlot(
                 this.genGlobalImg,
@@ -3093,7 +3430,6 @@ class BerniniDirectorEditor {
 
         if (this.isGlobalMode()) return;
 
-        const seg = this.timeline.segments[this.selectedIndex];
         if (!seg) return;
         const fps = this.getFrameRate();
         this.segLabel.textContent = `片段 ${this.selectedIndex + 1}`;
@@ -3113,7 +3449,10 @@ class BerniniDirectorEditor {
         }
         this.segInfo.textContent = info;
         this.segPrompt.value = seg.prompt || "";
-        this.renderRefSlots(seg.refs, this.segRefsBox, false);
+        const segKey = resolveTaskKey(seg.taskType || this.timeline.global?.taskType || this.getTaskKey());
+        if (taskUsesReferenceImages(segKey)) {
+            this.renderRefSlots(seg.refs, this.segRefsBox, false);
+        }
         if (this.isGenImage() && !this.isGlobalMode()) {
             this.renderGenSrcSlot(this.genSegImg, seg.genImage?.imageFile, "点击上传片段源图片");
         }
@@ -3241,12 +3580,11 @@ class BerniniDirectorEditor {
     setRunProgress(detail) {
         if (!this.runStatusEl) return;
         const timelineTotal = this.timeline?.segments?.length || 0;
-        const segTotal = Math.max(
-            timelineTotal,
-            detail.segment_total || 0,
-            1,
-        );
-        const seg = Math.max(1, detail.segment || 1);
+        const runTotal = Math.max(detail.segment_total || this.getRunProgressSegmentTotal(), 1);
+        const runSeg = Math.max(1, detail.segment || 1);
+        const timelineSeg = detail.timeline_segment ?? runSeg;
+        const partialRun = !!detail.partial_run
+            || (this.isRunSelectEnabled?.() && runTotal < timelineTotal);
         const phaseLabel = detail.phase_label || detail.phase || "运行中";
         const overallPct = detail.overall_max > 0
             ? Math.round((100 * detail.overall_value) / detail.overall_max)
@@ -3254,17 +3592,19 @@ class BerniniDirectorEditor {
         const phasePct = detail.phase_max > 0
             ? Math.round((100 * detail.phase_value) / detail.phase_max)
             : 0;
-        const remain = Math.max(0, segTotal - seg);
+        const remain = Math.max(0, runTotal - runSeg);
 
         if (detail.phase === "finish") {
             this.runStatusEl.className = "bd-run-status done";
             this.runTitleEl.textContent = "运行状态：全部完成";
-            this.runDetailEl.textContent = segTotal
+            this.runDetailEl.textContent = runTotal
                 ? (this.isImageBatch()
                     ? (isVideoBatchTask(this.getTaskKey())
-                        ? `共生成 ${segTotal} 组视频`
-                        : `共生成 ${segTotal} 张图片`)
-                    : `共处理 ${segTotal} 个片段`)
+                        ? `共生成 ${runTotal} 组视频`
+                        : `共生成 ${runTotal} 张图片`)
+                    : (partialRun
+                        ? `共处理 ${runTotal} 个选中片段`
+                        : `共处理 ${runTotal} 个片段`))
                 : "处理完成";
             this.runOverallEl.style.width = "100%";
             this.runPhaseEl.style.width = "100%";
@@ -3275,18 +3615,28 @@ class BerniniDirectorEditor {
         }
 
         this.runStatusEl.className = "bd-run-status active";
-        this._runHighlightSeg = seg - 1;
-        const title = detail.phase === "plan"
-            ? (segTotal > 1 ? `共 ${segTotal} 组 · ${phaseLabel}` : phaseLabel)
-            : (this.isImageBatch()
-                ? `第 ${seg}/${segTotal} 组 · ${phaseLabel}`
-                : `段 ${seg}/${segTotal} · ${phaseLabel}`);
+        this._runHighlightSeg = timelineSeg - 1;
+        let title;
+        if (detail.phase === "plan") {
+            title = runTotal > 1 ? `共 ${runTotal} 段 · ${phaseLabel}` : phaseLabel;
+        } else if (this.isImageBatch()) {
+            title = `第 ${runSeg}/${runTotal} 组 · ${phaseLabel}`;
+        } else if (partialRun) {
+            title = `段 #${timelineSeg}（${runSeg}/${runTotal}）· ${phaseLabel}`;
+        } else {
+            title = `段 ${runSeg}/${runTotal} · ${phaseLabel}`;
+        }
         this.runTitleEl.textContent = title;
         const parts = [];
         if (detail.frames_label) parts.push(detail.frames_label);
         if (detail.task_key) parts.push(detail.task_key);
         parts.push(`整体 ${overallPct}%`);
-        if (segTotal > 1) parts.push(this.isImageBatch() ? `还剩 ${remain} 组` : `还剩 ${remain} 段`);
+        if (runTotal > 1) {
+            parts.push(this.isImageBatch() ? `还剩 ${remain} 组` : `还剩 ${remain} 段`);
+        }
+        if (partialRun && timelineTotal > runTotal) {
+            parts.push(`时间轴共 ${timelineTotal} 段`);
+        }
         this.runDetailEl.textContent = parts.join(" · ");
         this.runOverallEl.style.width = `${overallPct}%`;
         this.runPhaseEl.style.width = `${phasePct}%`;
@@ -3397,6 +3747,22 @@ function clearAllDirectorRunStatus() {
     }
 }
 
+/** Old workflows may still list removed output slots (e.g. segment_images). */
+function isBerniniDirectorNode(node) {
+    const cls = node?.comfyClass || node?.type || "";
+    return cls === "BerniniDirector" || cls === "BerniniDirectorExecute";
+}
+
+function stripDeprecatedDirectorOutputs(node) {
+    if (!isBerniniDirectorNode(node) || !node.outputs?.length) return;
+    const stale = new Set(["segment_images"]);
+    for (let i = node.outputs.length - 1; i >= 0; i--) {
+        if (stale.has(node.outputs[i]?.name)) {
+            node.removeOutput(i);
+        }
+    }
+}
+
 app.registerExtension({
     name: "ComfyUI.BerniniDirector",
     async setup() {
@@ -3429,6 +3795,7 @@ app.registerExtension({
                 detail?.image_b64 || "",
                 { frames: detail?.frames, fps: detail?.fps },
             );
+            editor.renderImageBatchGroups?.();
         });
 
         api.addEventListener("executing", ({ detail }) => {
@@ -3444,11 +3811,15 @@ app.registerExtension({
                 }
                 editor.renderImageBatchGroups?.();
             }
-            const segTotal = editor.timeline?.segments?.length || 1;
+            const segTotal = editor.getRunProgressSegmentTotal?.() ?? (editor.timeline?.segments?.length || 1);
+            const timelineTotal = editor.timeline?.segments?.length || segTotal;
             editor.setRunProgress({
                 node_id: detail,
                 segment: 1,
                 segment_total: segTotal,
+                timeline_segment: 1,
+                timeline_segment_total: timelineTotal,
+                partial_run: editor.isRunSelectEnabled?.() && segTotal < timelineTotal,
                 phase: "plan",
                 phase_label: "解析时间轴 / 加载视频",
                 phase_value: 0,
@@ -3470,6 +3841,7 @@ app.registerExtension({
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
     async loadedGraphNode(node) {
+        if (isBerniniDirectorNode(node)) stripDeprecatedDirectorOutputs(node);
         if (node._directorDomWidget) {
             ensureDirectorDomWidgetWidth(node);
             node._berniniEditor?.scheduleRender?.();
@@ -3491,6 +3863,7 @@ app.registerExtension({
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
+            stripDeprecatedDirectorOutputs(this);
             this.size = [1000, 680];
 
             const container = document.createElement("div");
@@ -3568,6 +3941,7 @@ app.registerExtension({
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
+            stripDeprecatedDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
                 hookTaskTypeWidget(this);

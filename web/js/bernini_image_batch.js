@@ -7,6 +7,7 @@ import {
     imageBatchRequiresFixedOutput,
     imageBatchVariant,
     isVideoBatchTask,
+    MAX_GEN_FRAMES,
     minFrameCount,
     newBatchSegment,
     resolveTaskKey,
@@ -39,10 +40,15 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-i2v-notice{display:none;color:#ffb74d;background:#3a2a12;border:1px solid #a67c00;border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.5}
 .bd-batch-i2v-notice.visible{display:block}
 .bd-batch-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bd-batch-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
+.bd-batch-run-all{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none}
+.bd-batch-run-all.hidden{display:none!important}
+.bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:560px;overflow-y:auto;padding-right:2px}
 .bd-batch-card{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,30%);gap:8px;align-items:stretch}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
 .bd-batch-card.done{border-color:#3a5080}
+.bd-batch-card.run-skipped{opacity:.42}
 .bd-batch-head{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .bd-batch-head b{color:#ccc;font-size:11px}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -109,6 +115,11 @@ export function mountImageBatchPanel(root) {
     panel.innerHTML = `
         <div class="bd-batch-toolbar">
             <button type="button" class="bd-btn bd-btn-primary" data-a="batch-add">+ 添加提示词组</button>
+            <button type="button" class="bd-btn bd-batch-run-select hidden" data-a="batch-run-select" title="开启后可勾选要运行的提示词组">选择运行</button>
+            <label class="bd-batch-run-all hidden" data-r="batch-run-all-wrap" title="勾选=全选，取消=全部不选">
+                <input type="checkbox" data-r="batch-run-all-cb">
+                <span>全选</span>
+            </label>
             <span class="bd-meta" data-r="batch-hint">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
@@ -120,7 +131,25 @@ export function mountImageBatchPanel(root) {
         hint: panel.querySelector('[data-r="batch-hint"]'),
         i2vNotice: panel.querySelector('[data-r="batch-i2v-notice"]'),
         addBtn: panel.querySelector('[data-a="batch-add"]'),
+        runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
+        runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
+        runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
     };
+}
+
+export function wireBatchRunSelectControls(editor, batchUi) {
+    editor.batchRunSelectBtn = batchUi.runSelectBtn;
+    editor.batchRunSelectAllWrap = batchUi.runSelectAllWrap;
+    editor.batchRunSelectAllCb = batchUi.runSelectAllCb;
+    batchUi.runSelectBtn?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        editor.toggleRunSelectMode?.();
+    });
+    batchUi.runSelectAllCb?.addEventListener("change", (e) => {
+        e.stopPropagation();
+        if (!editor.isRunSelectEnabled?.()) return;
+        editor.setRunSelectionAll?.(batchUi.runSelectAllCb.checked);
+    });
 }
 
 export function ensureImageBatchTimeline(editor) {
@@ -153,7 +182,7 @@ export function ensureImageBatchTimeline(editor) {
     }
     for (const seg of editor.timeline.segments) {
         if (isVideoBatchTask(taskKey)) {
-            const fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defFc, minFrameCount(taskKey), 512);
+            const fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defFc, minFrameCount(taskKey), MAX_GEN_FRAMES);
             seg.frameCount = fc;
             seg.length = fc;
         } else {
@@ -184,7 +213,7 @@ export function normalizeImageBatchSegments(editor) {
     const fixed = [];
     for (const seg of editor.timeline.segments) {
         const fc = isVideo
-            ? clamp(parseInt(seg.frameCount ?? seg.length, 10) || defFc, minFc, 512)
+            ? clamp(parseInt(seg.frameCount ?? seg.length, 10) || defFc, minFc, MAX_GEN_FRAMES)
             : 1;
         fixed.push({
             ...seg,
@@ -451,9 +480,12 @@ export function renderImageBatchGroups(editor) {
             t2i: "文生图 · 全部导出 · 从 images 输出批量取图",
             i2i: "图生图 · 每组需上传源图 · 最长边缩放或固定宽高",
             r2i: "参考主体生图 · 每组最多 5 张参考图",
-            t2v: "文生视频 · 每组可设帧数 · 固定宽高 · 全部导出至 images",
-            r2v: "参考主体生视频 · 每组最多 5 张参考图 · 提示词可用 image0–image4 · 每组可设帧数",
-            i2v: "图生视频 · 实验性功能 · 上传源图 · 每组可设帧数",
+            t2v: "文生视频 · 每组可设帧数 · 开启「选择运行」可只跑勾选的组",
+            r2v: "参考主体生视频 · 每组可设帧数 · 开启「选择运行」可只跑勾选的组",
+            i2v: "图生视频 · 实验性功能 · 开启「选择运行」可只跑勾选的组",
+            r2i: "参考主体生图 · 开启「选择运行」可只跑勾选的组",
+            t2i: "文生图 · 开启「选择运行」可只跑勾选的组",
+            i2i: "图生图 · 开启「选择运行」可只跑勾选的组",
         };
         editor.batchHint.textContent = hints[key] || (isVideo ? "每组生成一段视频" : "每组生成 1 张图片");
     }
@@ -468,6 +500,9 @@ export function renderImageBatchGroups(editor) {
         const card = document.createElement("div");
         card.className = "bd-batch-card";
         if (index === runningIdx) card.classList.add("running");
+        if (editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.() && !editor.isSegmentRunEnabled(index)) {
+            card.classList.add("run-skipped");
+        }
         const hasPreview = isVideo
             ? (seg.previewFrames?.length > 0 || seg.previewB64)
             : !!seg.previewB64;
@@ -475,6 +510,18 @@ export function renderImageBatchGroups(editor) {
 
         const head = document.createElement("div");
         head.className = "bd-batch-head";
+        if (editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.()) {
+            const runCb = document.createElement("input");
+            runCb.type = "checkbox";
+            runCb.className = "bd-batch-run-check";
+            runCb.checked = editor.isSegmentRunEnabled(index);
+            runCb.title = "勾选后参与本次运行";
+            runCb.onclick = (e) => {
+                e.stopPropagation();
+                editor.toggleSegmentRun(index);
+            };
+            head.appendChild(runCb);
+        }
         const title = document.createElement("b");
         title.textContent = `提示词组 ${index + 1}`;
         head.appendChild(title);
@@ -483,10 +530,10 @@ export function renderImageBatchGroups(editor) {
         if (isVideo) {
             const fcRow = document.createElement("label");
             fcRow.className = "bd-batch-fc";
-            fcRow.innerHTML = `帧数 <input type="number" min="${minFrameCount(key)}" max="512" step="1" value="${seg.frameCount ?? seg.length ?? 81}">`;
+            fcRow.innerHTML = `帧数 <input type="number" min="${minFrameCount(key)}" max="${MAX_GEN_FRAMES}" step="1" value="${seg.frameCount ?? seg.length ?? 81}">`;
             const fcInput = fcRow.querySelector("input");
             fcInput.onchange = () => {
-                const v = clamp(parseInt(fcInput.value, 10) || defaultFrameCount(key), minFrameCount(key), 512);
+                const v = clamp(parseInt(fcInput.value, 10) || defaultFrameCount(key), minFrameCount(key), MAX_GEN_FRAMES);
                 fcInput.value = String(v);
                 seg.frameCount = v;
                 seg.length = v;

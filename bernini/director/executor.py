@@ -12,13 +12,14 @@ from ..nodes.wan import BerniniWanContextEmbeds
 from ...engine.bernini_core_nodes import WanVideoDecode
 from ...engine.nodes_sampler import WanVideoSamplerv2
 
+from ..video_io import load_timeline_segment
 from .plan import (
     DirectorPlan,
     plan_summary,
     prepare_segment_clip,
     refs_to_kwargs_for_context,
-    slice_video_frames,
 )
+from .segment_cache import load_segment_cache, save_segment_cache
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 
 log = logging.getLogger("ComfyUI-Bernini.director")
@@ -26,6 +27,37 @@ log = logging.getLogger("ComfyUI-Bernini.director")
 
 def _needs_source_video(task_key: str) -> bool:
     return task_key in {"v2v", "rv2v", "vi2v", "vrc2v", "mv2v", "ads2v", "i2v", "i2i"}
+
+
+def _source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
+    """Scaled source frames for skipped v2v segments with no generation cache yet."""
+    raw_clip = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
+    target_len = raw_clip.shape[0]
+    if plan.output_mode == "fixed":
+        clip = fit_canvas(raw_clip, plan.width, plan.height)
+    else:
+        clip = fit_video_long_edge(raw_clip, plan.ref_max_size)
+    clip, _ = prepare_segment_clip(clip, target_len)
+    return clip.cpu().float()
+
+
+def _segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
+    """Best-effort fill for skipped segments (gen source clip, then timeline video)."""
+    if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
+        target_len = max(1, seg.frame_count or int(seg.source_clip.shape[0]))
+        clip = seg.source_clip.clone()
+        if clip.shape[0] > target_len:
+            clip = clip[:target_len]
+        elif clip.shape[0] < target_len:
+            pad = clip[-1:].repeat(target_len - clip.shape[0], 1, 1, 1)
+            clip = torch.cat([clip, pad], dim=0)
+        return clip.cpu().float()
+    if _needs_source_video(seg.task_key):
+        try:
+            return _source_passthrough_chunk(plan, seg)
+        except Exception:
+            return None
+    return None
 
 
 def _tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
@@ -80,29 +112,43 @@ def execute_director_plan(
     vae_force_offload: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], str]:
     """Process every segment; return combined frames, per-segment frames, and report."""
-    source_video = plan.source_video
-    if source_video.ndim != 4:
-        raise ValueError("source_video must be [F, H, W, C]")
-
     text_encoder = BerniniTextEncodeCached()
     context_node = BerniniWanContextEmbeds()
     sampler = WanVideoSamplerv2()
     decoder = WanVideoDecode()
 
+    all_segments = plan.segments
+    run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
+    run_list = sorted(run_indices)
+    seg_total = len(run_list)
+    progress_pos = {idx: pos for pos, idx in enumerate(run_list)}
+
     output_chunks: list[torch.Tensor] = []
     segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), ""]
-    seg_total = plan.segment_count
+    if plan.run_indices is not None:
+        skipped = [i + 1 for i in range(len(all_segments)) if i not in run_indices]
+        reports.append(
+            f"Run selection: {len(run_list)}/{len(all_segments)} segment(s) "
+            f"(indices {[i + 1 for i in run_list]}; skipped {skipped or 'none'})"
+        )
+        if plan.export_mode == "all" and skipped:
+            reports.append(
+                "Export mode all: skipped segment(s) use cache when available; "
+                "v2v/i2v segments without cache fall back to source video for merge."
+            )
 
-    for seg in plan.segments:
+    def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
         meta = {
             "frames_label": _frames_label(seg),
             "task_key": seg.task_key,
+            "timeline_segment_index": seg.index,
+            "timeline_segment_total": len(all_segments),
         }
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="prepare",
             phase_value=0,
@@ -110,12 +156,11 @@ def execute_director_plan(
             **meta,
         )
 
-        raw_clip = seg.source_clip.clone() if seg.source_clip is not None else slice_video_frames(
-            source_video, seg.start_frame, seg.end_frame
+        raw_clip = seg.source_clip.clone() if seg.source_clip is not None else load_timeline_segment(
+            plan.raw, seg.start_frame, seg.end_frame
         )
         target_len = raw_clip.shape[0]
         if seg.source_clip is not None:
-            # Already scaled in plan build — keep each i2i/i2v group on its own canvas.
             clip = raw_clip
         elif plan.output_mode == "fixed":
             clip = fit_canvas(raw_clip, plan.width, plan.height)
@@ -125,7 +170,7 @@ def execute_director_plan(
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="prepare",
             phase_value=1,
@@ -137,7 +182,7 @@ def execute_director_plan(
         seg_negative = (seg.negative_prompt or "").strip() or negative_prompt
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="text_encode",
             phase_value=0,
@@ -156,7 +201,7 @@ def execute_director_plan(
         )
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="text_encode",
             phase_value=1,
@@ -174,7 +219,7 @@ def execute_director_plan(
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="context_encode",
             phase_value=0,
@@ -194,7 +239,7 @@ def execute_director_plan(
         )
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="context_encode",
             phase_value=1,
@@ -204,7 +249,7 @@ def execute_director_plan(
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="high_noise",
             phase_value=0,
@@ -224,7 +269,7 @@ def execute_director_plan(
         )
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="high_noise",
             phase_value=1,
@@ -234,7 +279,7 @@ def execute_director_plan(
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="low_noise",
             phase_value=0,
@@ -255,7 +300,7 @@ def execute_director_plan(
         )
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="low_noise",
             phase_value=1,
@@ -265,7 +310,7 @@ def execute_director_plan(
 
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="decode",
             phase_value=0,
@@ -284,7 +329,7 @@ def execute_director_plan(
         )
         report_director_progress(
             node_id,
-            segment_index=seg.index,
+            segment_index=progress_index,
             segment_total=seg_total,
             phase="decode",
             phase_value=1,
@@ -299,8 +344,7 @@ def execute_director_plan(
             decoded = torch.cat([decoded, pad], dim=0)
 
         chunk = decoded.cpu().float()
-        output_chunks.append(chunk)
-        segment_outputs.append(chunk)
+        save_segment_cache(node_id, seg, plan, chunk)
 
         if plan.global_task_key in {"t2i", "i2i", "r2i"} and decoded.shape[0] >= 1:
             try:
@@ -334,21 +378,68 @@ def execute_director_plan(
                 log.debug("Segment video preview skipped: %s", exc)
 
         reports.append(
-            f"Segment {seg.index + 1}/{plan.segment_count}: {task_hint} "
+            f"Segment {seg.index + 1}/{len(all_segments)}: {task_hint} "
             f"({target_len} frames, high_seed={high_noise_seed}, low_seed={low_noise_seed})"
         )
         log.info(
             "Bernini Director segment %d/%d done (%d frames, task=%s)",
             seg.index + 1,
-            plan.segment_count,
+            len(all_segments),
             target_len,
             seg.task_key,
         )
+        return chunk
 
-    if not output_chunks:
+    for seg in all_segments:
+        if seg.index in run_indices:
+            chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
+            segment_outputs.append(chunk)
+            if plan.export_mode == "all":
+                output_chunks.append(chunk)
+            continue
+
+        if plan.export_mode != "all":
+            continue
+
+        cached = load_segment_cache(node_id, seg, plan)
+        if cached is not None:
+            reports.append(
+                f"Segment {seg.index + 1}/{len(all_segments)}: "
+                f"loaded from cache ({cached.shape[0]} frames)"
+            )
+        elif _needs_source_video(seg.task_key) or seg.source_clip is not None:
+            try:
+                cached = _segment_passthrough_chunk(plan, seg)
+                if cached is not None:
+                    log.info(
+                        "Segment %d: no generation cache — using source/passthrough for merge.",
+                        seg.index + 1,
+                    )
+                    save_segment_cache(node_id, seg, plan, cached)
+                    reports.append(
+                        f"Segment {seg.index + 1}/{len(all_segments)}: "
+                        f"source passthrough ({cached.shape[0]} frames, no prior cache)"
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Segment %d source passthrough failed: %s",
+                    seg.index + 1,
+                    exc,
+                )
+                cached = None
+        if cached is None:
+            raise ValueError(
+                f"Segment {seg.index + 1} is not selected and has no valid cache. "
+                "Run all segments once (全部运行), or include this segment in your run selection. "
+                "Partial re-run with 「全部导出」 requires cached results for skipped segments "
+                "(v2v/i2v may use source video or uploaded image when available)."
+            )
+        output_chunks.append(cached.float())
+
+    if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
 
     report_director_finish(node_id, seg_total)
 
-    combined = cat_frames_variable_size(output_chunks)
+    combined = cat_frames_variable_size(output_chunks) if output_chunks else cat_frames_variable_size(segment_outputs)
     return combined, segment_outputs, "\n".join(reports)

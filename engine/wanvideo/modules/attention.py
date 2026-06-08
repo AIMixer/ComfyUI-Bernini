@@ -1,3 +1,4 @@
+# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 import torch
 from typing import List
 from ...utils import log
