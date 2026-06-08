@@ -242,6 +242,12 @@ function formatUploadError(err) {
     return msg;
 }
 
+function formatProbeFps(value) {
+    const fps = Math.round(Number(value) * 100) / 100;
+    if (Number.isInteger(fps)) return String(fps);
+    return fps.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 async function uploadToInput(file) {
     const body = new FormData();
     body.append("image", file);
@@ -1691,7 +1697,8 @@ class BerniniDirectorEditor {
             const dim = c.storageWidth && c.storageHeight
                 ? ` · ${c.storageWidth}×${c.storageHeight}`
                 : (this._storageWidth && this._storageHeight ? ` · ${this._storageWidth}×${this._storageHeight}` : "");
-            this.videoNameEl.textContent = `${c.fileName || c.videoFile} (${total}f${dim})`;
+            const fpsHint = c.nativeFps > 0 ? ` · ${formatProbeFps(c.nativeFps)}fps` : "";
+            this.videoNameEl.textContent = `${c.fileName || c.videoFile} (${total}f${fpsHint}${dim})`;
             return;
         }
         this.videoNameEl.textContent = `${clips.length} 段视频 · 共 ${total} 帧`;
@@ -2622,19 +2629,55 @@ class BerniniDirectorEditor {
         });
     }
 
-    async _prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix }) {
+    async _prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix, syncNativeFps = true }) {
         this.videoNameEl.textContent = `${statusPrefix}: ${fileName}…`;
         const viewUrl = inputViewUrl(relPath, type || "input");
-        const meta = await this.probeVideoMetadata(viewUrl);
+
+        let serverProbe = null;
+        try {
+            serverProbe = await this.probeVideoFile(relPath, subfolder, type);
+        } catch (err) {
+            console.warn("[BerniniDirector] video probe failed, using browser estimate:", err);
+        }
+        const browserMeta = await this.probeVideoMetadata(viewUrl);
+        const nativeFps = Number(serverProbe?.native_fps || 0);
+        const meta = {
+            width: Number(serverProbe?.width || browserMeta.width || 0),
+            height: Number(serverProbe?.height || browserMeta.height || 0),
+            duration: Number(serverProbe?.duration ?? browserMeta.duration ?? 0),
+            nativeFps,
+            probeMethod: serverProbe?.probe_method || "browser_estimate",
+        };
+
+        if (syncNativeFps && nativeFps > 0) {
+            const fps = Math.round(nativeFps * 100) / 100;
+            if (this.frameRateWidget) this.frameRateWidget.value = fps;
+            this.timeline.frameRate = fps;
+        }
 
         const fps = this.getFrameRate();
-        const totalFrames = Math.max(1, Math.round(meta.duration * fps));
+        const totalFrames = Math.max(
+            1,
+            Number(serverProbe?.frame_count) || Math.round(meta.duration * fps),
+        );
 
         const store = resolveOutputDimensions(meta.width, meta.height, this.timeline.output || { mode: "long_edge", longEdge: 848 }, {
             refMaxSize: this.refMaxWidget?.value,
         });
 
         return { fileName, relPath, subfolder, type, meta, totalFrames, store, viewUrl };
+    }
+
+    async probeVideoFile(relPath, subfolder = "", type = "input") {
+        const resp = await api.fetchApi("/bernini/director/probe_video", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ videoFile: relPath, subfolder, type: type || "input" }),
+        });
+        if (!resp.ok) {
+            throw new Error(await resp.text());
+        }
+        return resp.json();
     }
 
     _buildClipRecord({ fileName, relPath, subfolder, type, meta, totalFrames, store }) {
@@ -2647,6 +2690,7 @@ class BerniniDirectorEditor {
             width: meta.width,
             height: meta.height,
             duration: meta.duration,
+            nativeFps: meta.nativeFps || null,
             sourceFrameCount: totalFrames,
             storageWidth: store.width,
             storageHeight: store.height,
@@ -2688,7 +2732,10 @@ class BerniniDirectorEditor {
     }
 
     async _applyAppendedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
-        const prep = await this._prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix });
+        const prep = await this._prepareVideoFrames({
+            fileName, relPath, subfolder, type, statusPrefix,
+            syncNativeFps: false,
+        });
         const { totalFrames, store } = prep;
 
         this._ensureVideoClipsArray();
@@ -3763,6 +3810,34 @@ function stripDeprecatedDirectorOutputs(node) {
     }
 }
 
+/** After adding audio output, old workflows linked report at slot 1 — move those links to slot 3. */
+function migrateDirectorOutputLinks(node) {
+    if (!isBerniniDirectorNode(node)) return;
+    const graph = app.graph ?? app.canvas?.graph;
+    const links = graph?.links;
+    if (!links?.length) return;
+    const outputs = node.outputs || [];
+    const hasAudioSlot = outputs.some((o) => o?.name === "audio");
+    const reportSlot = outputs.findIndex((o) => o?.name === "report");
+    if (!hasAudioSlot || reportSlot < 0) return;
+
+    for (const link of links) {
+        if (!link || String(link.origin_id) !== String(node.id)) continue;
+        if (link.origin_slot !== 1) continue;
+        const target = graph.getNodeById?.(link.target_id);
+        const input = target?.inputs?.[link.target_slot];
+        const inputType = (input?.type || "").toUpperCase();
+        if (inputType === "STRING") {
+            link.origin_slot = reportSlot;
+        }
+    }
+}
+
+function normalizeDirectorOutputs(node) {
+    stripDeprecatedDirectorOutputs(node);
+    migrateDirectorOutputLinks(node);
+}
+
 app.registerExtension({
     name: "ComfyUI.BerniniDirector",
     async setup() {
@@ -3841,7 +3916,7 @@ app.registerExtension({
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
     async loadedGraphNode(node) {
-        if (isBerniniDirectorNode(node)) stripDeprecatedDirectorOutputs(node);
+        if (isBerniniDirectorNode(node)) normalizeDirectorOutputs(node);
         if (node._directorDomWidget) {
             ensureDirectorDomWidgetWidth(node);
             node._berniniEditor?.scheduleRender?.();
@@ -3863,7 +3938,7 @@ app.registerExtension({
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
-            stripDeprecatedDirectorOutputs(this);
+            normalizeDirectorOutputs(this);
             this.size = [1000, 680];
 
             const container = document.createElement("div");
@@ -3941,7 +4016,7 @@ app.registerExtension({
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
-            stripDeprecatedDirectorOutputs(this);
+            normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
                 hookTaskTypeWidget(this);

@@ -2634,6 +2634,14 @@ class WanModel(torch.nn.Module):
         if context_latents is not None and len(context_latents) > 0:
             context_frame_shapes = []
             for lat in context_latents:
+                if not isinstance(lat, torch.Tensor):
+                    log.warning("Skipping invalid Bernini context latent (expected Tensor, got %s)", type(lat))
+                    continue
+                if lat.ndim == 3:
+                    lat = lat.unsqueeze(1)
+                elif lat.ndim != 4:
+                    log.warning("Skipping Bernini context latent with unexpected rank %d", lat.ndim)
+                    continue
                 lat = lat.to(device=x[0].device, dtype=x[0].dtype)
                 # Pad spatial dims to patch_size so RoPE token count matches Conv3d output
                 p_t, p_h, p_w = self.patch_size

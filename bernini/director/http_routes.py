@@ -88,6 +88,46 @@ async def bernini_upload_video_chunk(request):
     return web.json_response({"name": filename, "subfolder": "", "type": "input"})
 
 
+async def bernini_probe_video(request):
+    try:
+        if request.can_read_body and request.content_type == "application/json":
+            body = await request.json()
+        else:
+            body = dict(request.query)
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid request: {exc}")
+
+    video_file = str(body.get("videoFile") or body.get("video_file") or "").strip()
+    if not video_file:
+        return web.Response(status=400, text="Missing videoFile.")
+
+    from ..video_io import probe_video_clip
+
+    clip = {
+        "videoFile": video_file,
+        "fileName": os.path.basename(video_file),
+        "subfolder": str(body.get("subfolder") or "").strip(),
+        "type": str(body.get("type") or "input").strip() or "input",
+    }
+    try:
+        info = probe_video_clip(clip)
+    except Exception as exc:
+        log.warning("Bernini Director video probe failed: %s", exc)
+        return web.Response(status=400, text=str(exc))
+    return web.json_response(info)
+
+
+def _register_route(routes, method: str, path: str, handler) -> None:
+    if hasattr(routes, "add_route"):
+        routes.add_route(method, path, handler)
+    elif method == "POST" and hasattr(routes, "post"):
+        routes.post(path)(handler)
+    elif method == "GET" and hasattr(routes, "get"):
+        routes.get(path)(handler)
+    else:
+        raise AttributeError("Unsupported ComfyUI route table API")
+
+
 def register_routes() -> bool:
     """Register Bernini Director HTTP routes on the ComfyUI PromptServer."""
     global _ROUTES_REGISTERED
@@ -100,13 +140,9 @@ def register_routes() -> bool:
         return False
 
     routes = server.routes
-    path = "/bernini/director/upload_chunk"
-    if hasattr(routes, "add_route"):
-        routes.add_route("POST", path, bernini_upload_video_chunk)
-    elif hasattr(routes, "post"):
-        routes.post(path)(bernini_upload_video_chunk)
-    else:
-        raise AttributeError("Unsupported ComfyUI route table API")
+    _register_route(routes, "POST", "/bernini/director/upload_chunk", bernini_upload_video_chunk)
+    _register_route(routes, "POST", "/bernini/director/probe_video", bernini_probe_video)
+    _register_route(routes, "GET", "/bernini/director/probe_video", bernini_probe_video)
     _ROUTES_REGISTERED = True
     log.info("Bernini Director HTTP routes registered")
     return True

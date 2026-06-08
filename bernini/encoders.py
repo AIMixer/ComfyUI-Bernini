@@ -128,16 +128,26 @@ def build_context_latents(
     """Build ordered Bernini context streams: source → ref video → ref images."""
     streams: list[torch.Tensor] = []
 
+    def _append_stream(tensor: torch.Tensor) -> None:
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"Bernini context encoder returned {type(tensor)!r}, expected Tensor.")
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(1)
+        if tensor.ndim != 4:
+            raise ValueError(f"Bernini context latent must be 4D [C,F,H,W], got shape {tuple(tensor.shape)}")
+        streams.append(tensor)
+
     if source_video is not None:
-        streams.append(encoder.encode_source_video(source_video, width, height, frame_limit))
+        _append_stream(encoder.encode_source_video(source_video, width, height, frame_limit))
 
     if reference_video is not None:
-        streams.append(encoder.encode_reference_video(reference_video, ref_max_edge, frame_limit))
+        _append_stream(encoder.encode_reference_video(reference_video, ref_max_edge, frame_limit))
 
     for batch in reference_images:
         if batch is None or batch.shape[0] == 0:
             continue
-        streams.extend(encoder.encode_reference_batch(batch, ref_max_edge))
+        for latent in encoder.encode_reference_batch(batch, ref_max_edge):
+            _append_stream(latent)
 
     encoder.offload()
     return streams

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 
+import torch
+
 from ..director.audio_export import build_director_audio_outputs, task_passes_source_audio
 from ..director.executor import execute_director_plan
 from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
@@ -353,7 +355,12 @@ class BerniniDirector:
             output_frame_end=frame_count if not (export_segments or (is_batch and not video_batch)) else None,
         )
         if task_passes_source_audio(plan.global_task_key):
-            has_audio = any(a is not None for a in audio_out)
+            has_audio = any(
+                isinstance(a, dict)
+                and isinstance(a.get("waveform"), torch.Tensor)
+                and int(a["waveform"].numel()) > 0
+                for a in audio_out
+            )
             if has_audio:
                 report = report + "\n\nSource audio: extracted from input video (connect audio → VHS Video Combine)."
             else:

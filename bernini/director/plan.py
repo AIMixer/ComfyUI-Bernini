@@ -88,9 +88,10 @@ class DirectorPlan:
 
 
 def wan_align_frame_count(frame_count: int) -> int:
+    """Round up to Wan 4n+1 frame count (1, 5, 9, …)."""
     if frame_count <= 1:
         return 1
-    return ((frame_count - 1) // 4) * 4 + 1
+    return ((frame_count - 1 + 3) // 4) * 4 + 1
 
 
 def _decode_image_b64(b64_str: str) -> torch.Tensor:
