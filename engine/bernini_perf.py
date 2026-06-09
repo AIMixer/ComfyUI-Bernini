@@ -61,7 +61,7 @@ def prefer_merged_loras(lora: list[dict[str, Any]] | None) -> list[dict[str, Any
 
 
 def default_teacache_args(timesteps) -> dict[str, Any]:
-    """Conservative TeaCache defaults for Bernini Wan2.2 4+4 step schedules."""
+    """TeaCache defaults when explicitly enabled (Director toggle or cache_args)."""
     return {
         "cache_type": "TeaCache",
         "cache_device": "cpu",

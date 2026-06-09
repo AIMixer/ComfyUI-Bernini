@@ -120,7 +120,7 @@ def execute_director_plan(
     low_noise_seed: int = 0,
     low_noise_force_offload: bool = True,
     low_noise_add_noise_to_samples: bool = False,
-    enable_teacache: bool = True,
+    enable_teacache: bool = False,
     high_noise_extra_args=None,
     low_noise_extra_args=None,
     enable_vae_tiling: bool = False,

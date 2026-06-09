@@ -157,8 +157,8 @@ class BerniniDirector:
                 "enable_teacache": (
                     "BOOLEAN",
                     {
-                        "default": True,
-                        "tooltip": "TeaCache 加速双阶段采样（关 = 全精度，更慢、画质更稳）。若已连接 Extra Args 的 Cache 节点，以 Cache 为准。",
+                        "default": False,
+                        "tooltip": "TeaCache 加速双阶段采样（开 = 更快，画质可能略降）。默认关 = 全精度。若已连接 Extra Args 的 Cache 节点，以 Cache 为准。",
                     },
                 ),
             },
@@ -222,7 +222,7 @@ class BerniniDirector:
         low_noise_extra_args=None,
         tiled_vae=False,
         vae_force_offload=True,
-        enable_teacache=True,
+        enable_teacache=False,
         **kwargs,
     ):
         del kwargs  # bd_grp_* section headers — UI only

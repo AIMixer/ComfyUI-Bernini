@@ -858,13 +858,11 @@ class WanVideoSampler:
         transformer.enable_teacache = transformer.enable_magcache = transformer.enable_easycache = False
         cache_args = teacache_args if teacache_args is not None else cache_args #for backward compatibility on old workflows
         if cache_args is None and teacache_args is None and image_embeds.get("bernini_pipeline"):
-            if enable_teacache is not False:
+            if enable_teacache is True:
                 from .bernini_perf import default_teacache_args
 
                 cache_args = default_teacache_args(timesteps)
-                log.info("Bernini perf: TeaCache auto-enabled (rel_l1_thresh=0.15, mode=e, coefficients on)")
-            else:
-                log.info("Bernini perf: TeaCache disabled (full-precision sampling)")
+                log.info("Bernini perf: TeaCache enabled (rel_l1_thresh=0.15, mode=e, coefficients on)")
         if cache_args is not None:
             from .cache_methods.cache_methods import set_transformer_cache_method
             transformer = set_transformer_cache_method(transformer, timesteps, cache_args)
