@@ -1,6 +1,5 @@
 # Copyright (c) 2025 kijai
 # Modified from the original work (https://github.com/kijai/ComfyUI-WanVideoWrapper)
-# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 # Licensed under the Apache License, Version 2.0
 
 import os, gc, math, copy
@@ -19,6 +18,7 @@ from .cache_methods.cache_methods import cache_report
 from .nodes_model_loading import load_weights
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
 from contextlib import nullcontext
+from .bernini_guidance import MomentumBuffer, normalized_guidance as _normalized_guidance
 from ..bernini.guidance_modes import BERNINI_GUIDANCE_MODES, uses_apg_guidance
 
 from comfy import model_management as mm
@@ -34,57 +34,6 @@ rope_functions = ["default", "comfy", "comfy_chunked"]
 
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
-
-
-# --- APG (Adaptive Projected Guidance) helpers, adapted from Bernini ---
-
-class MomentumBuffer:
-    """EMA buffer for smoothing guidance differences across timesteps."""
-
-    def __init__(self, momentum: float = -0.5):
-        self.momentum = momentum
-        self.running_average = 0
-
-    def update(self, value: torch.Tensor):
-        self.running_average = value + self.momentum * self.running_average
-
-
-def _normalize_diff(diff: torch.Tensor, base_pred: torch.Tensor,
-                    momentum_buffer: MomentumBuffer | None = None,
-                    eta: float = 1.0, norm_threshold: float = 0.0) -> torch.Tensor:
-    """Project diff onto/off base_pred and recombine with weight eta.
-
-    Operates on 4-D tensors [C, F, H, W] (spatial latent format).
-    Norm is computed over the spatio-temporal dims [-1, -2, -3] = [F, H, W].
-    """
-    # Momentum
-    if momentum_buffer is not None:
-        momentum_buffer.update(diff)
-        diff = momentum_buffer.running_average
-
-    # Norm clipping
-    if norm_threshold > 0:
-        diff_n = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
-        scale = torch.minimum(torch.ones_like(diff_n), norm_threshold / diff_n)
-        diff = diff * scale
-
-    # Parallel / orthogonal projection in double precision
-    v0 = diff.double()
-    v1 = base_pred.double()
-    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
-    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3], keepdim=True) * v1
-    v0_orthogonal = v0 - v0_parallel
-    return (v0_orthogonal + eta * v0_parallel).to(diff.dtype)
-
-
-def _normalized_guidance(pred_cond: torch.Tensor, pred_uncond: torch.Tensor,
-                         guidance_scale: float,
-                         momentum_buffer: MomentumBuffer | None = None,
-                         eta: float = 1.0, norm_threshold: float = 0.0) -> torch.Tensor:
-    """Single-condition APG: project (cond - uncond) onto cond with eta weight."""
-    nd = _normalize_diff(pred_cond - pred_uncond, pred_cond,
-                         momentum_buffer, eta, norm_threshold)
-    return pred_uncond + guidance_scale * nd
 
 
 class WanVideoSampler:
@@ -149,9 +98,21 @@ class WanVideoSampler:
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False,
-        guidance_mode="none", apg_eta=0.5, apg_momentum=-0.5, apg_norm_threshold=50.0):
+        guidance_mode="none", apg_eta=0.5, apg_momentum=-0.5, apg_norm_threshold=50.0, enable_teacache=None):
         if flowedit_args is not None:
             raise Exception("FlowEdit support has been deprecated and removed due to lack of use and code maintainability")
+        _unsupported = (
+            (unianimate_poses, "UniAnimate"),
+            (fantasytalking_embeds, "FantasyTalking"),
+            (uni3c_embeds, "Uni3C"),
+            (multitalk_embeds, "MultiTalk"),
+        )
+        for value, label in _unsupported:
+            if value is not None:
+                raise ValueError(
+                    f"{label} is not supported in ComfyUI-Bernini. "
+                    "Use Bernini Context Embeds + Sampler for video workflows."
+                )
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -167,6 +128,11 @@ class WanVideoSampler:
 
         transformer_options = copy.deepcopy(patcher.model_options.get("transformer_options", None))
         merge_loras = transformer_options["merge_loras"]
+
+        if image_embeds.get("bernini_pipeline"):
+            from .bernini_perf import apply_block_swap_tuning
+
+            apply_block_swap_tuning(transformer_options)
 
         block_swap_args = transformer_options.get("block_swap_args", None)
         if block_swap_args is not None:
@@ -316,17 +282,14 @@ class WanVideoSampler:
             else:
                 image_cond[:, 1:] = 0
 
-            #ATI tracks
+            # ATI tracks (not bundled — use Bernini Context Embeds instead)
             if transformer_options is not None:
                 ATI_tracks = transformer_options.get("ati_tracks", None)
                 if ATI_tracks is not None:
-                    from .ATI.motion_patch import patch_motion
-                    topk = transformer_options.get("ati_topk", 2)
-                    temperature = transformer_options.get("ati_temperature", 220.0)
-                    ati_start_percent = transformer_options.get("ati_start_percent", 0.0)
-                    ati_end_percent = transformer_options.get("ati_end_percent", 1.0)
-                    image_cond_ati = patch_motion(ATI_tracks.to(image_cond.device, image_cond.dtype), image_cond, topk=topk, temperature=temperature)
-                    log.info(f"ATI tracks shape: {ATI_tracks.shape}")
+                    raise ValueError(
+                        "ATI motion tracks are not supported in ComfyUI-Bernini. "
+                        "Use Bernini Context Embeds for reference conditioning."
+                    )
 
             add_cond_latents = image_embeds.get("add_cond_latents", None)
             if add_cond_latents is not None:
@@ -549,23 +512,11 @@ class WanVideoSampler:
 
         latent_video_length = noise.shape[1]
 
-        # Initialize FreeInit filter if enabled
-        freq_filter = None
         if freeinit_args is not None:
-            from .freeinit.freeinit_utils import get_freq_filter, freq_mix_3d
-            filter_shape = list(noise.shape)  # [batch, C, T, H, W]
-            freq_filter = get_freq_filter(
-                filter_shape,
-                device=device,
-                filter_type=freeinit_args.get("freeinit_method", "butterworth"),
-                n=freeinit_args.get("freeinit_n", 4) if freeinit_args.get("freeinit_method", "butterworth") == "butterworth" else None,
-                d_s=freeinit_args.get("freeinit_s", 1.0),
-                d_t=freeinit_args.get("freeinit_t", 1.0)
+            raise ValueError(
+                "FreeInit is not supported in ComfyUI-Bernini. "
+                "Remove freeinit_args from the sampler extra inputs."
             )
-            if samples is not None:
-                saved_generator_state = samples.get("generator_state", None)
-                if saved_generator_state is not None:
-                    seed_g.set_state(saved_generator_state)
 
         # UniAnimate
         if unianimate_poses is not None:
@@ -891,18 +842,6 @@ class WanVideoSampler:
             feta_args = None
             enhance_enabled = False
 
-        # EchoShot https://github.com/D2I-ai/EchoShot
-        echoshot = False
-        shot_len = None
-        if text_embeds is not None:
-            echoshot = text_embeds.get("echoshot", False)
-        if echoshot:
-            shot_num = len(text_embeds["prompt_embeds"])
-            shot_len = [latent_video_length//shot_num] * (shot_num-1)
-            shot_len.append(latent_video_length-sum(shot_len))
-            rope_function = "default" #echoshot does not support comfy rope function
-            log.info(f"Number of shots in prompt: {shot_num}, Shot token lengths: {shot_len}")
-
         # Bindweave
         qwenvl_embeds_pos = image_embeds.get("qwenvl_embeds_pos", None)
         qwenvl_embeds_neg = image_embeds.get("qwenvl_embeds_neg", None)
@@ -918,6 +857,14 @@ class WanVideoSampler:
         previous_cache_states = None
         transformer.enable_teacache = transformer.enable_magcache = transformer.enable_easycache = False
         cache_args = teacache_args if teacache_args is not None else cache_args #for backward compatibility on old workflows
+        if cache_args is None and teacache_args is None and image_embeds.get("bernini_pipeline"):
+            if enable_teacache is not False:
+                from .bernini_perf import default_teacache_args
+
+                cache_args = default_teacache_args(timesteps)
+                log.info("Bernini perf: TeaCache auto-enabled (rel_l1_thresh=0.15, mode=e, coefficients on)")
+            else:
+                log.info("Bernini perf: TeaCache disabled (full-precision sampling)")
         if cache_args is not None:
             from .cache_methods.cache_methods import set_transformer_cache_method
             transformer = set_transformer_cache_method(transformer, timesteps, cache_args)
@@ -1004,16 +951,10 @@ class WanVideoSampler:
         d = transformer.dim // transformer.num_heads
 
         if mocha_embeds is not None:
-            from .mocha.nodes import rope_params_mocha
-            log.info("Using Mocha RoPE")
-            rope_function = 'mocha'
-
-            freqs = torch.cat([
-                rope_params_mocha(1024, d - 4 * (d // 6), L_test=latent_video_length, k=riflex_freq_index, start=-1),
-                rope_params_mocha(1024, 2 * (d // 6), start=-1),
-                rope_params_mocha(1024, 2 * (d // 6), start=-1)
-            ],
-            dim=1)
+            raise ValueError(
+                "MoCha embeds are not supported in ComfyUI-Bernini. "
+                "Use Bernini Context Embeds for reference conditioning."
+            )
         elif "default" in rope_function or bidirectional_sampling: # original RoPE
             freqs = torch.cat([
                 rope_params(1024, d - 4 * (d // 6), L_test=latent_video_length, k=riflex_freq_index),
@@ -1489,7 +1430,7 @@ class WanVideoSampler:
                     "nag_context": text_embeds.get("nag_prompt_embeds", None), # normalized attention guidance context
                     "multitalk_audio": multitalk_audio_input, # Multi/InfiniteTalk audio input
                     "ref_target_masks": ref_target_masks if multitalk_audio_embeds is not None else None, # Multi/InfiniteTalk reference target masks
-                    "inner_t": [shot_len] if shot_len else None, # inner timestep for EchoShot
+                    "inner_t": None,
                     "standin_input": standin_input, # Stand-in reference input
                     "fantasy_portrait_input": fantasy_portrait_input, # Fantasy portrait input
                     "phantom_ref": phantom_ref, # Phantom reference input
@@ -1685,8 +1626,8 @@ class WanVideoSampler:
 
                     #batched
                     else:
-                        base_params['z'] = [z] * 2
-                        base_params['y'] = [image_cond_input] * 2 if image_cond_input is not None else None
+                        base_params["x"] = [z, z]
+                        base_params["y"] = [image_cond_input, image_cond_input] if image_cond_input is not None else None
                         base_params['clip_fea'] = torch.cat([clip_fea, clip_fea], dim=0)
                         cache_state_uncond = None
                         [noise_pred_cond, noise_pred_uncond_text], _, cache_state_cond = transformer(
@@ -1776,8 +1717,77 @@ class WanVideoSampler:
         except Exception:
             pass
 
-        # Main sampling loop with FreeInit iterations
-        iterations = freeinit_args.get("freeinit_num_iters", 3) if freeinit_args is not None else 1
+        # Bernini runtime: dedicated denoise loop + slim transformer forward
+        from .bernini_runtime import bernini_runtime_eligible
+        from .bernini_denoise import BerniniDenoiseConfig, run_bernini_denoise
+
+        _use_bernini_runtime = (
+            bernini_runtime_eligible(
+                image_embeds,
+                context_options=context_options,
+                transformer=transformer,
+                unianimate_poses=unianimate_poses,
+                fantasytalking_embeds=fantasytalking_embeds,
+                uni3c_embeds=uni3c_embeds,
+                multitalk_embeds=multitalk_embeds,
+                loop_args=loop_args,
+                experimental_args=experimental_args,
+                freeinit_args=freeinit_args,
+                flowedit_args=flowedit_args,
+                feta_args=feta_args,
+                batched_cfg=batched_cfg,
+            )
+            and not multitalk_sampling
+            and not framepack
+            and not wananimate_loop
+            and freeinit_args is None
+        )
+
+        if _use_bernini_runtime:
+            from .bernini_perf import auto_batched_cfg
+
+            effective_batched_cfg = batched_cfg or auto_batched_cfg(text_embeds, cfg, image_embeds)
+            if effective_batched_cfg and not batched_cfg:
+                log.info("Bernini perf: batched CFG auto-enabled")
+            context_fn = None
+            if context_options is not None:
+                from .context_windows.context import get_context_scheduler
+                context_fn = get_context_scheduler(context_options["context_schedule"])
+            denoise_cfg = BerniniDenoiseConfig(
+                transformer=transformer,
+                patcher=patcher,
+                model_meta=model,
+                sample_scheduler=sample_scheduler,
+                timesteps=timesteps,
+                cfg=cfg,
+                text_embeds=text_embeds,
+                seq_len=seq_len,
+                freqs=freqs,
+                context_latents=context_latents,
+                latent_video_length=latent_video_length,
+                steps=steps,
+                ttm_start_step=ttm_start_step,
+                device=device,
+                dtype=dtype,
+                guidance_mode=guidance_mode,
+                apg_eta=apg_eta,
+                apg_momentum=apg_momentum,
+                apg_norm_threshold=apg_norm_threshold,
+                context_options=context_options,
+                cache_state=self.cache_state,
+                force_offload=force_offload,
+                seed_g=seed_g,
+                scheduler_step_args=scheduler_step_args,
+                transformer_options=transformer_options or {},
+                vae_upscale_factor=vae_upscale_factor,
+                is_looped=is_looped,
+                context_fn=context_fn,
+                batched_cfg=effective_batched_cfg,
+            )
+            latent = run_bernini_denoise(denoise_cfg, latent, callback=callback)
+
+        # Main sampling loop with FreeInit iterations (skipped when Bernini runtime ran)
+        iterations = 0 if _use_bernini_runtime else (freeinit_args.get("freeinit_num_iters", 3) if freeinit_args is not None else 1)
         current_latent = latent
         initial_noise_saved = None
 
@@ -2196,7 +2206,7 @@ class WanVideoSampler:
 
                                 latent = sample_scheduler.step(
                                         noise_pred.unsqueeze(0), timestep, latent.unsqueeze(0),
-                                        **scheduler_step_args)[0].squeeze(0)
+                                        **scheduler_step_args)[0].squeeze(0).detach()
                                 if callback is not None:
                                     callback_latent = (latent_model_input.to(device) - noise_pred.to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
                                     callback(step_iteration_count, callback_latent, None, s2v_num_repeat*(len(timesteps)))
@@ -2470,7 +2480,7 @@ class WanVideoSampler:
                                 if use_tsr:
                                     noise_pred = temporal_score_rescaling(noise_pred, latent, timestep, tsr_k, tsr_sigma)
 
-                                latent = sample_scheduler.step(noise_pred.unsqueeze(0), timestep, latent.unsqueeze(0).to(noise_pred.device), **scheduler_step_args)[0].squeeze(0)
+                                latent = sample_scheduler.step(noise_pred.unsqueeze(0), timestep, latent.unsqueeze(0).to(noise_pred.device), **scheduler_step_args)[0].squeeze(0).detach()
                                 del noise_pred, latent_model_input, timestep
 
                                 # differential diffusion inpaint
@@ -2584,7 +2594,7 @@ class WanVideoSampler:
                     if len(timestep.shape) != 1 and clean_latent_indices and not is_pusa: #5b and longcat, skip clean latents for scheduler step
                         step_process_indices = [i for i in range(latent.shape[1]) if i not in clean_latent_indices]
                         latent[:, step_process_indices] = sample_scheduler.step(noise_pred[:, step_process_indices].unsqueeze(0), orig_timestep,
-                                                        latent[:, step_process_indices].unsqueeze(0), **scheduler_step_args)[0].squeeze(0)
+                                                        latent[:, step_process_indices].unsqueeze(0), **scheduler_step_args)[0].squeeze(0).detach()
                     else:
                         if latents_to_not_step > 0:
                             raw_latent = latent[:, :latents_to_not_step]
@@ -2595,16 +2605,18 @@ class WanVideoSampler:
                             latent = latent[:, :orig_noise_len]
                         else:
                             noise_pred_in = noise_pred
-                        latent = sample_scheduler.step(noise_pred_in.unsqueeze(0), timestep, latent.unsqueeze(0), **scheduler_step_args)[0].squeeze(0)
+                        latent = sample_scheduler.step(noise_pred_in.unsqueeze(0), timestep, latent.unsqueeze(0), **scheduler_step_args)[0].squeeze(0).detach()
                         if noise_pred_flipped is not None:
-                            latent_backwards = sample_scheduler_flipped.step(noise_pred_flipped.unsqueeze(0), timestep, latent_flipped.unsqueeze(0), **scheduler_step_args)[0].squeeze(0)
+                            latent_backwards = sample_scheduler_flipped.step(noise_pred_flipped.unsqueeze(0), timestep, latent_flipped.unsqueeze(0), **scheduler_step_args)[0].squeeze(0).detach()
                             latent_backwards = torch.flip(latent_backwards, dims=[1])
                             latent = latent * 0.5 + latent_backwards * 0.5
                         if latents_to_not_step > 0:
                             latent = torch.cat([raw_latent, latent], dim=1)
 
+                    latent = latent.detach()
+
                     if latent_ovi is not None:
-                        latent_ovi = sample_scheduler_ovi.step(noise_pred_ovi.unsqueeze(0), t, latent_ovi.to(device).unsqueeze(0), **scheduler_step_args)[0].squeeze(0)
+                        latent_ovi = sample_scheduler_ovi.step(noise_pred_ovi.unsqueeze(0), t, latent_ovi.to(device).unsqueeze(0), **scheduler_step_args)[0].squeeze(0).detach()
 
                     #InfiniteTalk first frame handling
                     if (extra_latents is not None
@@ -2650,6 +2662,13 @@ class WanVideoSampler:
                         callback(idx, callback_latent.permute(1,0,2,3), None, len(timesteps))
                     else:
                         pbar.update(1)
+
+                    noise_pred = noise_pred_in = noise_pred_ovi = None
+                    noise_pred_flipped = None
+                    latent_model_input = latent_model_input_ovi = None
+                    latent_model_input_flipped = None
+                    latent_flipped = latent_backwards = raw_latent = None
+                    timestep = orig_timestep = None
 
             except Exception as e:
                 log.error(f"Error during sampling: {e}")
@@ -2699,30 +2718,6 @@ class WanVideoSampler:
         },{
             "samples": callback_latent.unsqueeze(0).cpu() if callback is not None else None,
         })
-
-class WanVideoSamplerSettings(WanVideoSampler):
-    RETURN_TYPES = ("SAMPLER_ARGS",)
-    RETURN_NAMES = ("sampler_inputs", )
-    DESCRIPTION = "Node to output all settings and inputs for the WanVideoSamplerFromSettings -node"
-    def process(self, *args, **kwargs):
-        import inspect
-        params = inspect.signature(WanVideoSampler.process).parameters
-        args_dict = {name: kwargs.get(name, param.default if param.default is not inspect.Parameter.empty else None)
-                     for name, param in params.items() if name != "self"}
-        return args_dict,
-
-class WanVideoSamplerFromSettings(WanVideoSampler):
-    DESCRIPTION = "Utility node with no other functionality than to look cleaner, useful for the live preview as the main sampler node has become a messy monster"
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "sampler_inputs": ("SAMPLER_ARGS",),},
-        }
-
-    def process(self, sampler_inputs):
-        return super().process(**sampler_inputs)
-
 
 class WanVideoSamplerExtraArgs():
     @classmethod
@@ -2936,20 +2931,12 @@ class WanVideoSchedulerv2(WanVideoScheduler):
         return scheduler_dict,
 
 NODE_CLASS_MAPPINGS = {
-    "WanVideoSampler": WanVideoSampler,
-    "WanVideoSamplerSettings": WanVideoSamplerSettings,
-    "WanVideoSamplerFromSettings": WanVideoSamplerFromSettings,
     "WanVideoSamplerv2": WanVideoSamplerv2,
     "WanVideoSamplerExtraArgs": WanVideoSamplerExtraArgs,
-    "WanVideoScheduler": WanVideoScheduler,
     "WanVideoSchedulerv2": WanVideoSchedulerv2,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WanVideoSampler": "WanVideo Sampler",
-    "WanVideoSamplerSettings": "WanVideo Sampler Settings",
-    "WanVideoSamplerFromSettings": "WanVideo Sampler From Settings",
     "WanVideoSamplerv2": "WanVideo Sampler v2",
     "WanVideoSamplerExtraArgs": "WanVideoSampler v2 Extra Args",
-    "WanVideoScheduler": "WanVideo Scheduler",
     "WanVideoSchedulerv2": "WanVideo Scheduler v2",
-}
+    }

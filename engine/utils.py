@@ -109,6 +109,8 @@ def init_blockswap(transformer, block_swap_args, model):
                 block_swap_args["offload_txt_emb"],
                 block_swap_args["offload_img_emb"],
                 vace_blocks_to_swap = block_swap_args.get("vace_blocks_to_swap", None),
+                prefetch_blocks = block_swap_args.get("prefetch_blocks", 0),
+                block_swap_debug = block_swap_args.get("block_swap_debug", False),
             )
         elif model["auto_cpu_offload"]:
             for module in transformer.modules():

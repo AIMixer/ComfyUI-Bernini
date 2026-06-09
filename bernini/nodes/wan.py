@@ -93,6 +93,7 @@ class BerniniWanContextEmbeds:
             "target_shape": result.target_shape,
             "num_frames": num_frames,
             "context_latents": result.context_latents or None,
+            "bernini_pipeline": True,
         }
 
         task_hint = f"{result.task.label} — {TASK_DESCRIPTIONS[result.task.mode]}"
@@ -188,6 +189,7 @@ class BerniniWanContextMerge:
 
         merged.setdefault("target_shape", result.target_shape)
         merged.setdefault("num_frames", num_frames)
+        merged["bernini_pipeline"] = True
 
         task_hint = f"{result.task.label} — {TASK_DESCRIPTIONS[result.task.mode]}"
         return (merged, task_hint)

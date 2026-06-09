@@ -391,6 +391,46 @@ function ensureDirectorDomWidgetWidth(node) {
     return true;
 }
 
+function moveDirectorDomWidgetToEnd(node) {
+    const widget = node?._directorDomWidget;
+    if (!widget || !node?.widgets?.length) return;
+    const idx = node.widgets.indexOf(widget);
+    if (idx === -1 || idx === node.widgets.length - 1) return;
+    node.widgets.splice(idx, 1);
+    node.widgets.push(widget);
+}
+
+function bindDirectorDomWidgetSizing(node, widget, getEditor) {
+    const minHeight = () => getDirectorUiHeight(getEditor?.());
+    widget.computeSize = (width) => [width, minHeight()];
+    widget.computeLayoutSize = () => ({
+        minHeight: minHeight(),
+        minWidth: DIRECTOR_MIN_WIDTH,
+    });
+    if (widget.options) {
+        widget.options.getMinHeight = minHeight;
+    }
+    const el = widget.element;
+    if (el) el.style.minHeight = `${minHeight()}px`;
+}
+
+function initDirectorEditor(node) {
+    if (node._berniniEditor) return node._berniniEditor;
+    const container = node._directorDomWidget?.element;
+    if (!container) return null;
+    try {
+        hookTaskTypeWidget(node);
+        node._berniniEditor = new BerniniDirectorEditor(node, container, node._directorDomWidget);
+        ensureDirectorDomWidgetWidth(node);
+        bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._berniniEditor);
+        syncDirectorNodeSize(node, node._berniniEditor);
+        return node._berniniEditor;
+    } catch (err) {
+        console.error("[BerniniDirector] UI init failed:", err);
+        return null;
+    }
+}
+
 function patchDirectorDomWidgetLayout() {
     const canvas = app.canvas;
     if (!canvas || canvas._berniniDirectorLayoutPatch) return;
@@ -645,8 +685,12 @@ class BerniniDirectorEditor {
     updateDomWidgetHeight() {
         const h = getDirectorUiHeight(this);
         this.container?.style.setProperty("--comfy-widget-min-height", String(h));
-        if (this.domWidget?.options) {
-            this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
+        if (this.container) this.container.style.minHeight = `${h}px`;
+        if (this.domWidget) {
+            this.domWidget.computeSize = (width) => [width, h];
+            if (this.domWidget.options) {
+                this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
+            }
         }
     }
 
@@ -1112,7 +1156,11 @@ class BerniniDirectorEditor {
             e.preventDefault();
             const f = e.dataTransfer.files?.[0];
             if (f?.type.startsWith("video/")) this.loadVideoFile(f);
-            else if (f?.type.startsWith("image/")) this.addRefFromFile(f, this.getRefTarget());
+            else if (f?.type.startsWith("image/")) {
+                if (this.isImageBatch?.() && e.target.closest?.(".bd-batch-ref")) return;
+                if (this.isImageBatch?.()) return;
+                this.addRefFromFile(f, this.getRefTarget());
+            }
         });
     }
 
@@ -3918,7 +3966,10 @@ app.registerExtension({
     async loadedGraphNode(node) {
         if (isBerniniDirectorNode(node)) normalizeDirectorOutputs(node);
         if (node._directorDomWidget) {
+            moveDirectorDomWidgetToEnd(node);
             ensureDirectorDomWidgetWidth(node);
+            bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._berniniEditor);
+            initDirectorEditor(node);
             node._berniniEditor?.scheduleRender?.();
         }
     },
@@ -3943,6 +3994,7 @@ app.registerExtension({
 
             const container = document.createElement("div");
             container.className = "bd-host";
+            container.style.minHeight = `${getDirectorUiHeight(null)}px`;
             container.style.setProperty("--comfy-widget-min-height", String(getDirectorUiHeight(null)));
             const self = this;
             const widget = this.addDOMWidget("bernini_director_ui", "director", container, {
@@ -3960,25 +4012,15 @@ app.registerExtension({
                     self._berniniEditor?.onNodeResize?.();
                 },
             });
-            widget.computeLayoutSize = function () {
-                return {
-                    minHeight: getDirectorUiHeight(self._berniniEditor),
-                    minWidth: DIRECTOR_MIN_WIDTH,
-                };
-            };
+            bindDirectorDomWidgetSizing(self, widget, () => self._berniniEditor);
             widget.element = container;
             ensureDirectorDomWidgetWidth(self);
             self._directorDomWidget = widget;
+            moveDirectorDomWidgetToEnd(self);
 
             setTimeout(() => {
-                try {
-                    hookTaskTypeWidget(self);
-                    self._berniniEditor = new BerniniDirectorEditor(self, container, widget);
-                    ensureDirectorDomWidgetWidth(self);
-                    syncDirectorNodeSize(self, self._berniniEditor);
-                } catch (err) {
-                    console.error("[BerniniDirector] UI init failed:", err);
-                }
+                moveDirectorDomWidgetToEnd(self);
+                initDirectorEditor(self);
             }, 0);
             return r;
         };
@@ -4019,8 +4061,8 @@ app.registerExtension({
             normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
-                hookTaskTypeWidget(this);
-                const ed = this._berniniEditor;
+                moveDirectorDomWidgetToEnd(this);
+                const ed = initDirectorEditor(this) || this._berniniEditor;
                 if (!ed) return;
                 const initTotal = Math.max(0, parseInt(ed.totalFramesWidget?.value || 81, 10));
                 const initFps = parseFloat(ed.frameRateWidget?.value || 24);

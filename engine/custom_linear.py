@@ -1,4 +1,3 @@
-# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
@@ -15,54 +14,75 @@ def _align_block_scale(scale: torch.Tensor, column_dim: int) -> torch.Tensor:
     return scale
 
 
-@torch.library.custom_op("bernini::apply_lora", mutates_args=())
-def apply_lora(
-    weight: torch.Tensor,
-    lora_diff_0: torch.Tensor,
-    lora_diff_1: torch.Tensor,
-    lora_diff_2: float,
-    lora_strength: torch.Tensor,
-) -> torch.Tensor:
-    patch_diff = torch.mm(
-        lora_diff_0.flatten(start_dim=1),
-        lora_diff_1.flatten(start_dim=1),
-    ).reshape(weight.shape)
-    alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
-    return weight + patch_diff * lora_strength * alpha
+if not hasattr(torch.ops.bernini, 'apply_lora'):
+    @torch.library.custom_op("bernini::apply_lora", mutates_args=())
+    def apply_lora(
+        weight: torch.Tensor,
+        lora_diff_0: torch.Tensor,
+        lora_diff_1: torch.Tensor,
+        lora_diff_2: float,
+        lora_strength: torch.Tensor,
+    ) -> torch.Tensor:
+        patch_diff = torch.mm(
+            lora_diff_0.flatten(start_dim=1),
+            lora_diff_1.flatten(start_dim=1),
+        ).reshape(weight.shape)
+        alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
+        return weight + patch_diff * lora_strength * alpha
 
+    @apply_lora.register_fake
+    def _apply_lora_meta(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
+        return weight.clone()
 
-@apply_lora.register_fake
-def _apply_lora_meta(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
-    return weight.clone()
+if not hasattr(torch.ops.bernini, 'apply_single_lora'):
+    @torch.library.custom_op("bernini::apply_single_lora", mutates_args=())
+    def apply_single_lora(
+        weight: torch.Tensor,
+        lora_diff: torch.Tensor,
+        lora_strength: torch.Tensor,
+    ) -> torch.Tensor:
+        return weight + lora_diff * lora_strength
 
+    @apply_single_lora.register_fake
+    def _apply_single_lora_meta(weight, lora_diff, lora_strength):
+        return weight.clone()
 
-@torch.library.custom_op("bernini::apply_single_lora", mutates_args=())
-def apply_single_lora(
-    weight: torch.Tensor,
-    lora_diff: torch.Tensor,
-    lora_strength: torch.Tensor,
-) -> torch.Tensor:
-    return weight + lora_diff * lora_strength
+if not hasattr(torch.ops.bernini, 'linear_forward'):
+    @torch.library.custom_op("bernini::linear_forward", mutates_args=())
+    def linear_forward(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return torch.nn.functional.linear(input, weight, bias)
 
+    @linear_forward.register_fake
+    def _linear_forward_meta(input, weight, bias):
+        out_features = weight.shape[0]
+        return input.new_empty(list(input.shape[:-1]) + [out_features])
 
-@apply_single_lora.register_fake
-def _apply_single_lora_meta(weight, lora_diff, lora_strength):
-    return weight.clone()
+try:
+    @torch.library.impl("bernini::apply_lora", "CUDA")
+    def _apply_lora_cuda(weight, lora_diff_0, lora_diff_1, lora_diff_2, lora_strength):
+        patch_diff = torch.mm(lora_diff_0.flatten(start_dim=1), lora_diff_1.flatten(start_dim=1)).reshape(weight.shape)
+        alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
+        return weight + patch_diff * lora_strength * alpha
+except RuntimeError:
+    pass
 
+try:
+    @torch.library.impl("bernini::apply_single_lora", "CUDA")
+    def _apply_single_lora_cuda(weight, lora_diff, lora_strength):
+        return weight + lora_diff * lora_strength
+except RuntimeError:
+    pass
 
-@torch.library.custom_op("bernini::linear_forward", mutates_args=())
-def linear_forward(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    return torch.nn.functional.linear(input, weight, bias)
-
-
-@linear_forward.register_fake
-def _linear_forward_meta(input, weight, bias):
-    out_features = weight.shape[0]
-    return input.new_empty(list(input.shape[:-1]) + [out_features])
+try:
+    @torch.library.impl("bernini::linear_forward", "CUDA")
+    def _linear_forward_cuda(input, weight, bias):
+        return torch.nn.functional.linear(input, weight, bias)
+except RuntimeError:
+    pass
 
 
 #based on https://github.com/huggingface/diffusers/blob/main/src/diffusers/quantizers/gguf/utils.py
@@ -174,7 +194,7 @@ class CustomLinear(nn.Linear):
             self._matmul = self._matmul_op
 
     def _merge_lora_eager(self, weight, lora_a, lora_b, rank_scale, strength):
-        delta = torch.mm(lora_a.flatten(start_dim=1), lora_b.flatten(start_dim=1)).reshape(weight.shape)
+        delta = torch.mm(lora_a.flatten(start_dim=1), lora_b.flatten(start_dim=1)).reshape(weight.shape) + 0
         norm = rank_scale / lora_b.shape[0] if rank_scale != 0.0 else 1.0
         return weight + delta * strength * norm
 

@@ -153,6 +153,14 @@ class BerniniDirector:
                     {"default": False, "tooltip": "Tiled VAE during context encode (not decode)."},
                 ),
                 "vae_force_offload": ("BOOLEAN", {"default": True, "tooltip": "Offload VAE after context encode."}),
+                "bd_grp_perf": ("BDGROUP", {"default": "性能 Performance"}),
+                "enable_teacache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "TeaCache 加速双阶段采样（关 = 全精度，更慢、画质更稳）。若已连接 Extra Args 的 Cache 节点，以 Cache 为准。",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -214,6 +222,7 @@ class BerniniDirector:
         low_noise_extra_args=None,
         tiled_vae=False,
         vae_force_offload=True,
+        enable_teacache=True,
         **kwargs,
     ):
         del kwargs  # bd_grp_* section headers — UI only
@@ -302,6 +311,7 @@ class BerniniDirector:
             low_noise_seed=low_noise_seed,
             low_noise_force_offload=low_noise_force_offload,
             low_noise_add_noise_to_samples=low_noise_add_noise_to_samples,
+            enable_teacache=enable_teacache,
             high_noise_extra_args=high_noise_extra_args,
             low_noise_extra_args=low_noise_extra_args,
             enable_vae_tiling=enable_vae_tiling,

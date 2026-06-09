@@ -1,5 +1,4 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-# Parts of this implementation are inspired by https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
 import math
 import torch
 import torch.nn as nn
@@ -21,15 +20,64 @@ import gc
 from ...utils import log, get_module_memory_mb
 from ...enhance_a_video.enhance import get_feta_scores
 from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState, relative_l1_distance
-from ...multitalk.multitalk import get_attn_map_with_target
-from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
+from ...bernini_unsupported import reject_echoshot, reject_multitalk, reject_mtv_motion
 from ...custom_linear import update_lora_step
-from ...MTV.mtv import apply_rotary_emb
 from comfy.ldm.flux.math import apply_rope1 as apply_rope_comfy1
 from comfy.ldm.flux.math import apply_rope as apply_rope_comfy
 from comfy import model_management as mm
 
 __all__ = ['WanModel']
+
+
+def _module_first_device(module):
+    for tensor in module.parameters(recurse=True):
+        return tensor.device
+    for tensor in module.buffers(recurse=True):
+        return tensor.device
+    return None
+
+
+def _module_to_if_needed(module, device, **kwargs):
+    target_device = torch.device(device)
+    if _module_first_device(module) != target_device:
+        module.to(target_device, **kwargs)
+
+
+def _tensor_cache_version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
+def _bernini_text_cache_key(context, text_embed_dtype, device, text_len):
+    """Stable cache key for Bernini runtime text cross-attention embeddings."""
+    return (
+        tuple(
+            (
+                id(u),
+                u.data_ptr(),
+                tuple(u.shape),
+                u.dtype,
+                u.device,
+                _tensor_cache_version(u),
+            )
+            for u in context
+        ),
+        text_embed_dtype,
+        device,
+        text_len,
+    )
+
+
+def _mtv_apply_rotary_emb(x, freqs_cis):
+    cos, sin = freqs_cis
+    cos = cos[None, None].to(x.device)
+    sin = sin[None, None].to(x.device)
+    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)
+    x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+    return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+
 
 def apply_rotary_emb_split(hidden_states, freqs_cis, t_dim):
     """Apply rotary embedding only to the spatial (H/W) dimensions, leaving temporal (T) unchanged."""
@@ -518,10 +566,7 @@ class WanSelfAttention(nn.Module):
 
 
     def forward_multitalk(self, q, k, v, seq_lens, grid_sizes, ref_target_masks):
-        x = attention(q, k, v, k_lens=seq_lens, attention_mode=self.attention_mode, heads=self.num_heads)
-        x = self.o(x.flatten(2))
-        x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0], ref_target_masks=ref_target_masks)
-        return x, x_ref_attn_map
+        reject_multitalk()
 
 
     def forward_split(self, q, k, v, seq_lens, grid_sizes, seq_chunks):
@@ -674,10 +719,8 @@ class WanT2VCrossAttention(WanSelfAttention):
 
             v = self.v(context).view(b, -1, n, d)
 
-            #EchoShot rope
-            if inner_t is not None and cross_freqs is not None:
-                q = rope_apply_z(q, grid_sizes, cross_freqs, inner_t).to(q)
-                k = rope_apply_c(k, cross_freqs, inner_c).to(q)
+            if inner_t is not None:
+                reject_echoshot()
 
             x = attention(q, k, v, attention_mode=self.attention_mode, heads=self.num_heads).flatten(2)
 
@@ -867,7 +910,7 @@ class MTVCrafterMotionAttention(WanSelfAttention):
         # compute attention
         x = attention(
             q=rope_apply(q, grid_sizes, freqs),
-            k=apply_rotary_emb(k, pe).transpose(1, 2),
+            k=_mtv_apply_rotary_emb(k, pe).transpose(1, 2),
             v=v,
             heads=self.num_heads,
         )
@@ -1119,10 +1162,7 @@ class WanAttentionBlock(nn.Module):
 
         #RoPE and QKV computation
         if inner_t is not None:
-            #query, key, value
-            q, k, v = self.self_attn.qkv_fn(input_x)
-            q=rope_apply_echoshot(q, grid_sizes, freqs, inner_t).to(q)
-            k=rope_apply_echoshot(k, grid_sizes, freqs, inner_t).to(k)
+            reject_echoshot()
         elif x_ip is not None and self.kv_cache is None:
             # First pass - separate main and IP components
             x_main, x_ip_input = input_x[:, : -self.cond_size], input_x[:, -self.cond_size :]
@@ -1869,6 +1909,7 @@ class WanModel(torch.nn.Module):
         self.use_non_blocking = False
         self.prefetch_blocks = 0
         self.block_swap_debug = False
+        self.swap_cuda_stream = None
 
         self.video_attention_split_steps = []
         self.lora_scheduling_enabled = False
@@ -2114,6 +2155,11 @@ class WanModel(torch.nn.Module):
         log.info(f"Total memory used by transformer blocks: {(total_offload_memory + total_main_memory):.2f}MB")
         log.info(f"Non-blocking memory transfer: {self.use_non_blocking}")
         log.info("-" * 25)
+
+        if prefetch_blocks > 0 and torch.cuda.is_available():
+            self.swap_cuda_stream = torch.cuda.Stream(device=self.main_device, priority=0)
+        else:
+            self.swap_cuda_stream = None
 
     def forward_vace(
         self,
@@ -2426,14 +2472,39 @@ class WanModel(torch.nn.Module):
         context_frame_shapes = None
         context_window_start = kwargs.get("context_window_start", 0)
 
+        if transformer_options.get("bernini_core"):
+            from .bernini_core import forward as bernini_core_forward
+            return bernini_core_forward(
+                self,
+                x,
+                t,
+                context,
+                seq_len,
+                freqs=freqs,
+                context_latents=context_latents,
+                context_window_start=context_window_start,
+                is_uncond=is_uncond,
+                current_step=current_step,
+                last_step=last_step,
+                total_steps=total_steps,
+                pred_id=pred_id,
+                device=device,
+                transformer_options=transformer_options,
+                nag_params=nag_params,
+                nag_context=nag_context,
+                enhance_enabled=enhance_enabled,
+            )
+
+        if inner_t is not None:
+            reject_echoshot()
+        if multitalk_audio is not None or ref_target_masks is not None:
+            reject_multitalk()
+        if mtv_motion_tokens is not None:
+            reject_mtv_motion()
+
         # Stand-In only used on first positive pass, then cached in kv_cache
         if is_uncond or current_step > 0:
             standin_input = None
-
-        # MTV Crafter motion projection
-        if mtv_motion_tokens is not None:
-            bs, motion_seq_len =  mtv_motion_tokens.shape[0], mtv_motion_tokens.shape[1]
-            mtv_motion_tokens = torch.cat([mtv_motion_tokens, self.pad_motion_tokens.to(mtv_motion_tokens).expand(bs, motion_seq_len, -1)], dim=-1)
 
         # Fantasy Portrait
         adapter_proj = ip_scale = None
@@ -3283,8 +3354,12 @@ class WanModel(torch.nn.Module):
 
             # Asynchronous block offloading with CUDA streams and events
             if torch.cuda.is_available():
-                cuda_stream = None #torch.cuda.Stream(device=device, priority=0) # todo causes issues on some systems
-                events = [torch.cuda.Event() for _ in self.blocks]
+                cuda_stream = getattr(self, "swap_cuda_stream", None)
+                events = (
+                    [torch.cuda.Event() for _ in self.blocks]
+                    if self.prefetch_blocks > 0 and cuda_stream is None
+                    else None
+                )
                 swap_start_idx = len(self.blocks) - self.blocks_to_swap if self.blocks_to_swap > 0 else len(self.blocks)
             else:
                 cuda_stream = None
@@ -3324,7 +3399,10 @@ class WanModel(torch.nn.Module):
                     for prefetch_offset in range(1, self.prefetch_blocks + 1):
                         prefetch_idx = b + prefetch_offset
                         if prefetch_idx < len(self.blocks) and self.blocks_to_swap > 0 and prefetch_idx >= swap_start_idx:
-                            context_mgr = torch.cuda.stream(cuda_stream) if torch.cuda.is_available() else nullcontext()
+                            if cuda_stream is not None:
+                                context_mgr = torch.cuda.stream(cuda_stream)
+                            else:
+                                context_mgr = nullcontext()
                             with context_mgr:
                                 self.blocks[prefetch_idx].to(self.main_device, non_blocking=self.use_non_blocking)
                                 if events is not None:
@@ -3377,6 +3455,8 @@ class WanModel(torch.nn.Module):
                     compute_end = time.perf_counter()
                     compute_time = compute_end - compute_start
                     to_cpu_transfer_start = time.perf_counter()
+                if self.prefetch_blocks > 0 and cuda_stream is not None:
+                    torch.cuda.current_stream().wait_stream(cuda_stream)
                 if b >= swap_start_idx and self.blocks_to_swap > 0:
                     block.to(self.offload_device, non_blocking=self.use_non_blocking)
                 if self.block_swap_debug:

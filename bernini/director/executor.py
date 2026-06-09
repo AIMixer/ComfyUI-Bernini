@@ -120,6 +120,7 @@ def execute_director_plan(
     low_noise_seed: int = 0,
     low_noise_force_offload: bool = True,
     low_noise_add_noise_to_samples: bool = False,
+    enable_teacache: bool = True,
     high_noise_extra_args=None,
     low_noise_extra_args=None,
     enable_vae_tiling: bool = False,
@@ -132,6 +133,10 @@ def execute_director_plan(
     vae_force_offload: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], str]:
     """Process every segment; return combined frames, per-segment frames, and report."""
+    from .extra_args import merge_sampler_extra_args
+
+    high_extra = merge_sampler_extra_args(high_noise_extra_args, enable_teacache=enable_teacache)
+    low_extra = merge_sampler_extra_args(low_noise_extra_args, enable_teacache=enable_teacache)
     text_encoder = BerniniTextEncodeCached()
     context_node = BerniniWanContextEmbeds()
     sampler = WanVideoSamplerv2()
@@ -283,7 +288,7 @@ def execute_director_plan(
             seed=high_noise_seed,
             force_offload=high_noise_force_offload,
             add_noise_to_samples=high_noise_add_noise_to_samples,
-            extra_args=high_noise_extra_args,
+            extra_args=high_extra,
         )
         report_director_progress(
             node_id,
@@ -314,7 +319,7 @@ def execute_director_plan(
             seed=low_noise_seed,
             force_offload=low_noise_force_offload,
             add_noise_to_samples=low_noise_add_noise_to_samples,
-            extra_args=low_noise_extra_args,
+            extra_args=low_extra,
         )
         report_director_progress(
             node_id,

@@ -74,7 +74,7 @@ try:
 except Exception:
     PromptServer = None
 
-attention_modes = ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "sageattn_3", "radial_sage_attention", "sageattn_compiled",
+attention_modes = ["auto", "sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "sageattn_3", "radial_sage_attention", "sageattn_compiled",
                     "sageattn_ultravico", "comfy"]
 
 #from city96's gguf nodes
@@ -1057,7 +1057,7 @@ class WanVideoSetAttentionModeOverride:
         return {
             "required": {
                 "model": ("WANVIDEOMODEL", ),
-                "attention_mode": (attention_modes, {"default": "sdpa"}),
+                "attention_mode": (attention_modes, {"default": "auto", "tooltip": "auto picks sageattn_3 on Blackwell, flash_attn_2 or sageattn otherwise"}),
                 "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Step to start applying the attention mode override"}),
                 "end_step": ("INT", {"default": 10000, "min": 1, "max": 10000, "step": 1, "tooltip": "Step to end applying the attention mode override"}),
                 "verbose": ("BOOLEAN", {"default": False, "tooltip": "Print verbose info about attention mode override during generation"}),
@@ -1125,7 +1125,7 @@ class WanVideoModelLoader:
             "load_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Initial device to load the model to, NOT recommended with the larger models unless you have 48GB+ VRAM"}),
             },
             "optional": {
-                "attention_mode": (attention_modes, {"default": "sdpa"}),
+                "attention_mode": (attention_modes, {"default": "auto", "tooltip": "auto picks sageattn_3 on Blackwell, flash_attn_2 or sageattn otherwise"}),
                 "compile_args": ("WANCOMPILEARGS", ),
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                 "lora": ("WANVIDLORA", {"default": None}),
@@ -1149,6 +1149,12 @@ class WanVideoModelLoader:
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
         if vace_model is not None:
             extra_model = vace_model
+
+        from .bernini_perf import prefer_merged_loras, resolve_attention_mode
+
+        if lora is not None:
+            lora = prefer_merged_loras(lora)
+
         lora_low_mem_load = merge_loras = False
         if lora is not None:
             merge_loras = any(l.get("merge_loras", True) for l in lora)
@@ -1159,6 +1165,7 @@ class WanVideoModelLoader:
         mm.cleanup_models()
         mm.soft_empty_cache()
 
+        attention_mode = resolve_attention_mode(attention_mode)
         if "sage" in attention_mode:
             try:
                 from sageattention import sageattn
@@ -1211,6 +1218,8 @@ class WanVideoModelLoader:
         if any(key.startswith("audio_model.") for key in sd.keys()) and any(key.startswith("blocks.") for key in sd.keys()):
             extra_audio_model = True
 
+        from .bernini_unsupported import check_state_dict_for_unsupported
+        check_state_dict_for_unsupported(sd, multitalk_model=multitalk_model)
 
         is_wananimate = "pose_patch_embedding.weight" in sd
         # rename WanAnimate face fuser block keys to insert into main blocks instead
@@ -1549,99 +1558,9 @@ class WanVideoModelLoader:
                     block.cross_attn.ip_adapter_single_stream_k_proj = nn.Linear(context_dim, dim, bias=False)
                     block.cross_attn.ip_adapter_single_stream_v_proj = nn.Linear(context_dim, dim, bias=False)
 
-        # LongCat Avatar
-        proj1_key = "multitalk_audio_proj.proj1.weight" if "multitalk_audio_proj.proj1.weight" in sd \
-                    else "multitalk_audio_proj.proj1.weight_int8" if "multitalk_audio_proj.proj1.weight_int8" in sd \
-                    else None
-        if proj1_key is not None and ("blocks.0.audio_cross_attn.q_norm.weight" in sd or "blocks.0.audio_cross_attn.q_norm.weight_int8" in sd):
-            log.info("MultiTalk/InfiniteTalk model detected, patching model...")
-            from .multitalk.multitalk import AudioProjModel
-            from .wanvideo.modules.model import WanLayerNorm
-            from .LongCat.layers import SingleStreamAttention
-
-            # Detect LongCat-Avatar audio encoder variant from proj1 input dim:
-            #   v1.0 (wav2vec2): seq_len * blocks * channels = 5 * 12 * 768 = 46080
-            #   v1.5 (whisper):  seq_len * blocks * channels = 5 *  5 * 1280 = 32000
-            proj1_in = sd[proj1_key].shape[1]
-            if proj1_in == 32000:
-                audio_proj_blocks, audio_proj_channels = 5, 1280
-                log.info("LongCat-Avatar-1.5 (Whisper) audio proj detected")
-            else:
-                audio_proj_blocks, audio_proj_channels = 12, 768
-
-            for block in transformer.blocks:
-                with init_empty_weights():
-                    if "blocks.0.audio_modulation.1.weight" in sd:
-                        block.audio_modulation = nn.Sequential(nn.SiLU(), nn.Linear(512, 3 * dim, bias=True))
-                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
-                    block.audio_cross_attn = SingleStreamAttention(
-                            dim=dim,
-                            encoder_hidden_states_dim=768,
-                            num_heads=num_heads,
-                        qkv_bias=True,
-                        qk_norm=True,
-                        class_range=24,
-                        class_interval=4,
-                        attention_mode=attention_mode,
-                    )
-                    multitalk_proj_model = AudioProjModel(blocks=audio_proj_blocks, channels=audio_proj_channels)
-            transformer.multitalk_audio_proj = multitalk_proj_model
-        # SkyreelsV3
-        elif "blocks.1.audio_cross_attn.kv_linear.weight" in sd and "audio_proj.proj1.weight" in sd:
-            sd = {k.replace("audio_proj", "multitalk_audio_proj"): v for k, v in sd.items()}
-            # init audio module
-            from .multitalk.multitalk import SingleStreamMultiAttention, AudioProjModel
-            from .wanvideo.modules.model import WanLayerNorm
-
-            for block in transformer.blocks:
-                with init_empty_weights():
-                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
-                    block.audio_cross_attn = SingleStreamMultiAttention(dim=dim, num_heads=num_heads, attention_mode=attention_mode)
-
-            transformer.multitalk_audio_proj = AudioProjModel()
-        elif multitalk_model is not None:
-            multitalk_model_type = multitalk_model.get("model_type", "MultiTalk")
-            log.info(f"{multitalk_model_type} detected, patching model...")
-
-            multitalk_model_path = multitalk_model["model_path"]
-            if multitalk_model_path.endswith(".gguf") and not gguf:
-                raise ValueError("Multitalk/InfiniteTalk model is a GGUF model, main model also has to be a GGUF model.")
-            if "scaled" in multitalk_model and gguf:
-                raise ValueError("fp8 scaled Multitalk/InfiniteTalk model can't be used with GGUF main model")
-
-            # init audio module
-            from .multitalk.multitalk import SingleStreamMultiAttention
-            from .wanvideo.modules.model import WanLayerNorm
-
-            for block in transformer.blocks:
-                with init_empty_weights():
-                    block.norm_x = WanLayerNorm(dim, transformer.eps, elementwise_affine=True)
-                    block.audio_cross_attn = SingleStreamMultiAttention(dim=dim, num_heads=num_heads, attention_mode=attention_mode)
-            transformer.multitalk_audio_proj = multitalk_model["proj_model"]
-            transformer.multitalk_model_type = multitalk_model_type
-
-            extra_model_path = multitalk_model["model_path"]
-            extra_sd = {}
-            if multitalk_model_path.endswith(".gguf"):
-                extra_sd_temp, extra_reader = load_gguf(extra_model_path)
-                gguf_reader.append(extra_reader)
-                del extra_reader
-            else:
-                extra_sd_temp = load_torch_file(extra_model_path, device=transformer_load_device, safe_load=True)
-
-            for k, v in extra_sd_temp.items():
-                extra_sd[k.replace("audio_proj.", "multitalk_audio_proj.")] = v
-
-            sd.update(extra_sd)
-            del extra_sd
+        # LongCat Avatar / MultiTalk / SkyreelsV3 — rejected in check_state_dict_for_unsupported()
 
         sd = {k.replace(".weight_scale", ".scale_weight"): v for k, v in sd.items()}
-
-        # FlashVSR
-        if "LQ_proj_in.norm1.gamma" in sd:
-            log.info("FlashVSR model detected, patching model...")
-            from .FlashVSR.LQ_proj_model import Buffer_LQ4x_Proj
-            transformer.LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1)
 
         # Additional cond latents
         if "add_conv_in.weight" in sd:

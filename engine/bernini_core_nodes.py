@@ -114,15 +114,12 @@ Uses disk cache when enabled so repeat prompts skip T5 load entirely."""
         from .nodes_model_loading import LoadWanVideoT5TextEncoder
         pbar = ProgressBar(2)
 
-        echoshot = True if "[1]" in positive_prompt else False
-
         if use_disk_cache:
             context, context_null = get_cached_text_embeds(positive_prompt, negative_prompt)
             if context is not None and context_null is not None:
                 return{
                     "prompt_embeds": context,
                     "negative_prompt_embeds": context_null,
-                    "echoshot": echoshot,
                 },{"prompt_embeds": context_null}, positive_prompt
 
         t5, = LoadWanVideoT5TextEncoder().loadmodel(model_name, precision, "main_device", quantization)
@@ -171,7 +168,8 @@ class WanVideoTextEncode:
         if t5 is None and not use_disk_cache:
             raise ValueError("T5 encoder is required for text encoding. Please provide a valid T5 encoder or enable disk cache.")
 
-        echoshot = True if "[1]" in positive_prompt else False
+        if t5 is None and not use_disk_cache:
+            raise ValueError("T5 encoder is required for text encoding. Please provide a valid T5 encoder or enable disk cache.")
 
         if use_disk_cache:
             context, context_null = get_cached_text_embeds(positive_prompt, negative_prompt)
@@ -179,7 +177,6 @@ class WanVideoTextEncode:
                 return{
                     "prompt_embeds": context,
                     "negative_prompt_embeds": context_null,
-                    "echoshot": echoshot,
                 },
             
         if t5 is None:
@@ -273,7 +270,6 @@ class WanVideoTextEncode:
         prompt_embeds_dict = {
             "prompt_embeds": context,
             "negative_prompt_embeds": context_null,
-            "echoshot": echoshot,
         }
 
         # Save each part to its own cache file if needed

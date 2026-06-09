@@ -19,6 +19,12 @@ function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
 }
 
+function formatPreviewFps(value) {
+    const fps = Math.round(Number(value) * 100) / 100;
+    if (Number.isInteger(fps)) return String(fps);
+    return fps.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 function stopPlayer(el) {
     const st = _players.get(el);
     if (!st) return;
@@ -301,19 +307,36 @@ function readImageDimensions(file) {
     });
 }
 
+async function assignSegRefFromFile(editor, index, slot, file) {
+    if (!file?.type?.startsWith("image/")) return;
+    try {
+        const uploaded = await uploadImage(file);
+        const seg = editor.timeline.segments[index];
+        if (!seg) return;
+        seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        seg.refs.push({ index: slot, imageFile: relPath(uploaded), imageB64: "" });
+        editor.renderImageBatchGroups();
+        editor.commit();
+    } catch (err) {
+        console.error("[BerniniDirector] batch ref upload failed:", err);
+    }
+}
+
 async function uploadSegRef(editor, index, slot) {
-    pickFile("image/*", async (file) => {
-        try {
-            const uploaded = await uploadImage(file);
-            const seg = editor.timeline.segments[index];
-            if (!seg) return;
-            seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-            seg.refs.push({ index: slot, imageFile: relPath(uploaded), imageB64: "" });
-            editor.renderImageBatchGroups();
-            editor.commit();
-        } catch (err) {
-            console.error("[BerniniDirector] batch ref upload failed:", err);
-        }
+    pickFile("image/*", (file) => assignSegRefFromFile(editor, index, slot, file));
+}
+
+function bindBatchRefDrop(slot, editor, index, slotIndex) {
+    slot.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+    });
+    slot.addEventListener("drop", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const f = e.dataTransfer.files?.[0];
+        if (f) assignSegRefFromFile(editor, index, slotIndex, f);
     });
 }
 
@@ -405,7 +428,7 @@ function mountVideoPreview(el, seg, running, fps) {
     playBtn.textContent = "▶ 播放";
     const meta = document.createElement("div");
     meta.className = "bd-batch-vpreview-meta";
-    meta.textContent = `${frames.length} 帧 · ${fps} fps`;
+    meta.textContent = `${frames.length}帧 · ${formatPreviewFps(fps)}fps(预览)`;
     ctrl.appendChild(playBtn);
     wrap.appendChild(canvas);
     wrap.appendChild(ctrl);
@@ -569,6 +592,7 @@ export function renderImageBatchGroups(editor) {
                 slot.className = "bd-batch-ref";
                 renderRefSlot(slot, ref, i, index, editor);
                 slot.onclick = () => uploadSegRef(editor, index, i);
+                bindBatchRefDrop(slot, editor, index, i);
                 refs.appendChild(slot);
             }
             media.appendChild(refs);
