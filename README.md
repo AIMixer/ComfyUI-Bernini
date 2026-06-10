@@ -52,15 +52,29 @@ Standalone ComfyUI plugin with a **complete Wan 2.2 Bernini pipeline** that does
 
 ## Node chain
 
-`BerniniModelLoader` · `BerniniVAELoader` · `BerniniTextEncodeCached` · `BerniniContextEmbeds` · `BerniniContextOptions` · `BerniniSamplerExtraArgs` · `BerniniScheduler` · `BerniniSampler` · `BerniniDecode` · **`BerniniDirector`**
+`BerniniModelLoader` · `BerniniVAELoader` · `BerniniTextEncodeCached` · `BerniniContextEmbeds` · `BerniniContextOptions` · `BerniniSamplerExtraArgs` · `BerniniScheduler` · `BerniniSampler` · `BerniniDecode` · **`BerniniDirector`** · **`BerniniDirectorOfficial`**
 
-## Bernini Director
+## Bernini Director (KJ backend)
 
-All-in-one node with an embedded **timeline editor**: upload video and reference images inside the node, split segments, set per-segment prompts / `task_type`, then run the full Bernini HIGH/LOW pipeline in one queue.
+All-in-one node with an embedded **timeline editor**: upload video and reference images inside the node, split segments, set per-segment prompts / `task_type`, then run the full Bernini HIGH/LOW pipeline in one queue. Uses **Bernini Model Loader** (GGUF + Block Swap) for lower VRAM.
 
 ![Bernini Director node UI](docs/assets/bernini_director_ui.png)
 
 Example workflows: see [Example workflows](#example-workflows) below (all from [Comfyit article 489](https://comfyit.cn/article/489)).
+
+## Bernini Director Official (ComfyUI core backend)
+
+Same **timeline UI** as Bernini Director, but execution goes through ComfyUI native Bernini (`VAELoader` / `UNETLoader` ×2 / `CLIPLoader` → `BerniniConditioning` → dual-stage `KSamplerAdvanced`), aligned with [PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216).
+
+![Bernini Director Official node UI](docs/assets/bernini_director_official_ui.png)
+
+| | KJ Director | Official Director |
+|---|-------------|-------------------|
+| Models | Bernini Model Loader (GGUF) | UNETLoader fp8_scaled |
+| Text | Bernini Text Encode Cached | CLIPLoader (wan) |
+| VRAM | ~8 GB with Q4 GGUF | Higher; use `--lowvram`, CLIP on CPU |
+
+**Typical v2v workflow:** load `bernini_director_official_core_v2v_2.json` → connect VAE / UNET×2 / CLIP → upload source video → **Equal Split** into segments → global prompt → queue once, export all segments.
 
 ## Example workflows
 
@@ -76,6 +90,9 @@ Download **Bernini model weights + example JSON workflows** from [Comfyit: Berni
 | `bernini_director_minimal_test (i2v) .json` | `i2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (i2i).json` | `i2i` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v).json` | `rv2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_v2v_1.json` | `v2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_v2v_2.json` | `v2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_rv2v.json` | `rv2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(r2v) .json` | `r2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(v2v).json` | `v2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(vi2v) .json` | `vi2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |

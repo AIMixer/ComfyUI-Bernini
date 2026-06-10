@@ -3845,7 +3845,16 @@ function clearAllDirectorRunStatus() {
 /** Old workflows may still list removed output slots (e.g. segment_images). */
 function isBerniniDirectorNode(node) {
     const cls = node?.comfyClass || node?.type || "";
-    return cls === "BerniniDirector" || cls === "BerniniDirectorExecute";
+    return cls === "BerniniDirector"
+        || cls === "BerniniDirectorExecute"
+        || cls === "BerniniDirectorOfficial";
+}
+
+function isDirectorNodeDef(nodeType, nodeData) {
+    const cls = nodeType?.comfyClass || nodeData?.name || "";
+    return cls === "BerniniDirector"
+        || cls === "BerniniDirectorExecute"
+        || cls === "BerniniDirectorOfficial";
 }
 
 function stripDeprecatedDirectorOutputs(node) {
@@ -3984,7 +3993,7 @@ app.registerExtension({
         };
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeType.comfyClass !== "BerniniDirector" && nodeData.name !== "BerniniDirector") return;
+        if (!isDirectorNodeDef(nodeType, nodeData)) return;
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

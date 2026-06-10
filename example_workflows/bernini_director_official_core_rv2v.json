@@ -1,0 +1,344 @@
+{
+  "id": "bernini-director-official-core-rv2v",
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "version": 0.4,
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.23.0",
+    "note": "Bernini Director Official · rv2v（对齐 ComfyUI PR #14216 Bernini_testing_video_edit_02.json）",
+    "ds": {
+      "scale": 0.78,
+      "offset": [420, 80]
+    }
+  },
+  "groups": [
+    {
+      "id": 1,
+      "title": "官方流 · 模型加载 (ComfyUI core)",
+      "bounding": [40, 40, 420, 620],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Bernini Director Official（节点内上传源视频 + 参考图）",
+      "bounding": [500, 40, 1080, 860],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "输出",
+      "bounding": [1620, 40, 720, 860],
+      "color": "#b58",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "使用说明",
+      "bounding": [40, 680, 420, 420],
+      "color": "#432",
+      "flags": {}
+    }
+  ],
+  "links": [
+    [1, 1, 0, 4, 0, "VAE"],
+    [2, 2, 0, 4, 1, "MODEL"],
+    [3, 3, 0, 4, 2, "MODEL"],
+    [6, 7, 0, 4, 3, "CLIP"],
+    [4, 4, 0, 5, 0, "IMAGE"],
+    [7, 4, 1, 5, 1, "AUDIO"],
+    [5, 4, 3, 6, 0, "STRING"]
+  ],
+  "nodes": [
+    {
+      "id": 8,
+      "type": "MarkdownNote",
+      "pos": [60, 720],
+      "size": [380, 360],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "title": "Bernini Director Official · rv2v",
+      "properties": {},
+      "widgets_values": [
+        "## 快速开始\n\n1. **模型**：确认左侧 VAE / UNET×2 / CLIP 已指向本地权重（Comfy-Org fp8_scaled 或官方 mxfp8 均可）。\n2. **导演台**：在 Bernini Director Official 节点 UI 内上传 **源视频**（官方示例 `0075.mp4`）和 **参考图**（官方示例 `oldman.jpg`）。\n3. **提示词**：默认 rv2v + `An old man is digging with a shovel`，系统前缀自动拼接，负向 `bad video`。\n4. **采样**（已对齐官方）：6 步 · split 3 · res_multistep · simple · CFG 1.0 · seed 0 · 无 ModelSamplingSD3 / APG。\n5. **输出**：VHS 合成 MP4；若源视频含音轨，audio 口已连线可一并写入。\n\n### 可选（官方工作流另有）\n\n- UNET 链上挂 **lightx2v distill LoRA**（官方 HIGH 1.0 / LOW 1.5）\n- **PathchSageAttentionKJ** 加速\n\n参考：`Bernini_testing_video_edit_02.json`（ComfyUI PR #14216）"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "VAELoader",
+      "pos": [80, 80],
+      "size": [340, 58],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "title": "VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "wan_2.1_vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": ["wan_2.1_vae.safetensors"],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [1]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "UNETLoader",
+      "pos": [80, 180],
+      "size": [340, 82],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "title": "Bernini-R HIGH",
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "Wan22_Bernini_HIGH_fp8_e4m3fn_scaled.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Wan22_Bernini_HIGH_fp8_e4m3fn_scaled.safetensors",
+        "default"
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [2]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "UNETLoader",
+      "pos": [80, 300],
+      "size": [340, 82],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "title": "Bernini-R LOW",
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "Wan22_Bernini_LOW_fp8_e4m3fn_scaled.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Wan22_Bernini_LOW_fp8_e4m3fn_scaled.safetensors",
+        "default"
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [3]
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "CLIPLoader",
+      "pos": [80, 420],
+      "size": [340, 98],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "title": "CLIP (wan)",
+      "properties": {
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "wan",
+        "default"
+      ],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [6]
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "BerniniDirectorOfficial",
+      "pos": [540, 80],
+      "size": [1020, 780],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "title": "Bernini Director Official",
+      "properties": {
+        "Node name for S&R": "BerniniDirectorOfficial"
+      },
+      "widgets_values": [
+        "rv2v — 参考素材改视频",
+        "An old man is digging with a shovel",
+        "bad video",
+        "高噪采样设置",
+        1.0,
+        0,
+        "fixed",
+        "低噪采样设置",
+        1.0,
+        0,
+        "fixed",
+        24.0,
+        832,
+        480,
+        848,
+        81,
+        "{\"version\":4,\"editMode\":\"global\",\"totalFrames\":81,\"frameRate\":24,\"width\":832,\"height\":480,\"refMaxSize\":848,\"output\":{\"mode\":\"long_edge\",\"longEdge\":848,\"width\":832,\"height\":480,\"maxExportFrames\":0,\"exportMode\":\"all\"},\"videoClips\":[],\"video\":{\"fileName\":\"\",\"videoFile\":\"\",\"subfolder\":\"\",\"type\":\"input\",\"frames\":[],\"frameMap\":[]},\"global\":{\"taskType\":\"rv2v — 参考素材改视频\",\"prompt\":\"An old man is digging with a shovel\",\"refs\":[]},\"segments\":[{\"id\":\"s0\",\"start\":0,\"length\":81,\"prompt\":\"\",\"taskType\":\"\",\"refs\":[]}]}",
+        "官方采样",
+        6,
+        3,
+        "res_multistep",
+        "simple",
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "inputs": [
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1
+        },
+        {
+          "name": "model_high",
+          "type": "MODEL",
+          "link": 2
+        },
+        {
+          "name": "model_low",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [4]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [7]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [5]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "VHS_VideoCombine",
+      "pos": [1660, 280],
+      "size": [640, 560],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "title": "合成 MP4",
+      "properties": {
+        "Node name for S&R": "VHS_VideoCombine"
+      },
+      "widgets_values": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "Wan22_Bernini_Official",
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 19,
+        "save_metadata": true,
+        "trim_to_audio": false,
+        "pingpong": false,
+        "save_output": true
+      },
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 4
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "PreviewAny",
+      "pos": [1660, 80],
+      "size": [640, 160],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "title": "Director 运行报告",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 5
+        }
+      ],
+      "outputs": []
+    }
+  ]
+}

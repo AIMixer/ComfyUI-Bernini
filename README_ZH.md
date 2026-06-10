@@ -29,10 +29,11 @@
 | **Bernini Block Swap** / **Set Block Swap** | 显存优化 |
 | **Bernini LoRA Select Multi** / **Set LoRAs** | LoRA 加载 |
 | **Bernini Director** | 节点内时间轴导演台：上传视频/参考图、分割片段、分段提示词，一键批量跑 Bernini 双阶段推理 |
+| **Bernini Director Official** | 同上时间轴 UI，走 **ComfyUI 官方流**（`VAELoader` / `UNETLoader` / `CLIPLoader` + `BerniniConditioning` + 双阶段 `KSamplerAdvanced`） |
 
-## Bernini Director（导演台）
+## Bernini Director（导演台 · KJ 流）
 
-单个节点集成 **时间轴编辑 + 批量推理**：在节点内上传视频与参考图，分割/均分片段，全局或分段编辑提示词与 `task_type`，Queue 一次即可逐段执行 Bernini HIGH/LOW 并拼接输出。
+单个节点集成 **时间轴编辑 + 批量推理**：在节点内上传视频与参考图，分割/均分片段，全局或分段编辑提示词与 `task_type`，Queue 一次即可逐段执行 Bernini HIGH/LOW 并拼接输出。模型侧使用 **Bernini Model Loader**（支持 GGUF + Block Swap），显存优化选项较完整。
 
 ![Bernini Director 节点界面](docs/assets/bernini_director_ui.png)
 
@@ -43,6 +44,22 @@
 | 输出设置 | 最长边/固定分辨率、全部导出/分段导出、最大帧数 |
 | 片段编辑 | 每段正向/反向提示词、参考图 img0–4 |
 | 运行状态 | Queue 执行时显示片段与阶段进度 |
+
+## Bernini Director Official（导演台 · 官方流）
+
+与 **Bernini Director** 共用同一套 **时间轴 UI**（上传视频、均分多段、全局/分段 prompt），执行后端改为 ComfyUI 原生 Bernini 链路，对齐 [PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216) 官方示例（`BerniniConditioning` + 双阶段采样）。
+
+![Bernini Director Official 节点界面](docs/assets/bernini_director_official_ui.png)
+
+| 对比项 | Bernini Director（KJ） | Bernini Director Official |
+|--------|------------------------|---------------------------|
+| 模型入口 | `Bernini Model Loader`（GGUF / Block Swap） | `UNETLoader` ×2（fp8_scaled / mxfp8） |
+| 文本编码 | `Bernini Text Encode Cached`（T5 可 CPU / 磁盘缓存） | 外部 `CLIPLoader`（type: wan） |
+| VAE | `Bernini VAE Loader`（可分块 encode/decode） | `VAELoader`（`wan_2.1_vae`） |
+| 采样 | `Bernini Sampler` v2 + `force_offload` | 官方默认 6 步 · split 3 · `res_multistep` |
+| 显存 | Q4 GGUF 约 **8 GB** 起（推荐） | 较高；建议 `--lowvram`、CLIP 放 CPU |
+
+**典型用法（v2v 多段编辑）：** 加载 `bernini_director_official_core_v2v_2.json` → 连接 VAE / UNET×2 / CLIP → 在节点内上传源视频 → **均分** 为 10 段 → 全局 prompt（如「将人物头发换成红色」）→ Queue 逐段推理并 **全部导出**。
 
 示例工作流见下方 [示例工作流下载](#示例工作流下载)（均从 [Comfyit 文章 489](https://comfyit.cn/article/489) 获取）。
 
@@ -118,6 +135,9 @@
 | `bernini_director_minimal_test (i2i).json` | `i2i` | 导演台 · 图生图 · 多组提示词 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v).json` | `rv2v` | 导演台 · 参考图 + 源视频编辑 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v)).json` | `rv2v` | 导演台 · 参考图 + 源视频编辑（备用文件名） | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_v2v_1.json` | `v2v` | **官方导演台** · v2v 单段冒烟（上传源视频 + 全局 prompt） **新增** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_v2v_2.json` | `v2v` | **官方导演台** · v2v 多段均分（10 段 / 344 帧示例，如换发色） **新增** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_official_core_rv2v.json` | `rv2v` | **官方导演台** · 源视频 + 参考图（对齐 PR #14216 官方 rv2v 示例） | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(r2v) .json` | `r2v` | 纯参考图生视频（`reference_image_0`–`4` 对应 prompt 中 `image0`–`image4`） | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(v2v).json` | `v2v` | 源视频 prompt 驱动编辑 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_video_edit(vi2v) .json` | `vi2v` | 内容延展改视频 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
@@ -145,6 +165,18 @@ Bernini Sampler (LOW) → Bernini Decode → VHS_VideoCombine
 ```
 
 工作流使用 **Bernini \*** 节点链；socket 类型包括 `WANVIDEOMODEL`、`WANVIDIMAGE_EMBEDS` 等。
+
+## 工作流结构（官方导演台 · v2v 示例）
+
+```
+VAELoader (wan_2.1_vae)
+UNETLoader (Bernini HIGH) ──┐
+UNETLoader (Bernini LOW)  ──┼→ Bernini Director Official ← 节点内上传视频 / 均分多段
+CLIPLoader (umt5, type wan) ┘         ↓
+                              VHS_VideoCombine ← images + audio（保留源音轨）
+```
+
+官方导演台工作流使用 ComfyUI 标准 socket：`VAE`、`MODEL`、`CLIP`；采样参数默认 **6 步 / split 3 / res_multistep / CFG 1.0**（与官方 `Bernini_testing_video_edit_02.json` 一致）。仓库内 JSON 见 `example_workflows/bernini_director_official_core_v2v_*.json`。
 
 ## 外部辅助节点（可选）
 

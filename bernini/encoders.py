@@ -132,9 +132,21 @@ def build_context_latents(
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"Bernini context encoder returned {type(tensor)!r}, expected Tensor.")
         if tensor.ndim == 3:
+            # Single-frame image latent [C,H,W] → [C,1,H,W] (WanVAE / legacy).
             tensor = tensor.unsqueeze(1)
+        elif tensor.ndim == 5:
+            # ComfyUI core VAE (official Bernini path) returns [B,C,F,H,W].
+            if int(tensor.shape[0]) != 1:
+                raise ValueError(
+                    f"Bernini context latent batch must be 1, got shape {tuple(tensor.shape)}"
+                )
+            streams.append(tensor)
+            return
         if tensor.ndim != 4:
-            raise ValueError(f"Bernini context latent must be 4D [C,F,H,W], got shape {tuple(tensor.shape)}")
+            raise ValueError(
+                f"Bernini context latent must be 4D [C,F,H,W] or 5D [1,C,F,H,W], "
+                f"got shape {tuple(tensor.shape)}"
+            )
         streams.append(tensor)
 
     if source_video is not None:

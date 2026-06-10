@@ -6,6 +6,7 @@ Licensed under the Apache License, Version 2.0. See LICENSE.
 from .bernini.nodes.conditioning import BerniniConditioning, BerniniPlannerConditioning
 from .bernini.nodes.pipeline import PIPELINE_DISPLAY_NAMES, PIPELINE_NODE_MAPPINGS
 from .bernini.nodes.director import BerniniDirector, BerniniDirectorExecute
+from .bernini.nodes.director_official import BerniniDirectorOfficial
 from .bernini.nodes.wan import BerniniWanContextEmbeds, BerniniWanContextMerge
 
 NODE_CLASS_MAPPINGS = {
@@ -17,6 +18,7 @@ NODE_CLASS_MAPPINGS = {
     "BerniniWanContextMerge": BerniniWanContextMerge,
     "BerniniDirector": BerniniDirector,
     "BerniniDirectorExecute": BerniniDirectorExecute,
+    "BerniniDirectorOfficial": BerniniDirectorOfficial,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -27,6 +29,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BerniniWanContextMerge": "Bernini Wan Context Merge",
     "BerniniDirector": "Bernini Director",
     "BerniniDirectorExecute": "Bernini Director Execute",
+    "BerniniDirectorOfficial": "Bernini Director Official",
 }
 
 WEB_DIRECTORY = "./web/js"
