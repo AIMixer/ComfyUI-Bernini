@@ -85,6 +85,23 @@ def timeline_required_inputs() -> dict:
     }
 
 
+def director_perf_inputs() -> dict:
+    """Performance widgets shared by Bernini Director nodes."""
+    return {
+        "bd_grp_perf": ("BDGROUP", {"default": "性能 Performance"}),
+        "clear_vram_between_segments": (
+            "BOOLEAN",
+            {
+                "default": True,
+                "tooltip": (
+                    "段间清理显存：每段结束后卸载已加载模型并清空 CUDA 缓存，"
+                    "降低多段峰值显存（段间略慢），从而降低爆显存风险"
+                ),
+            },
+        ),
+    }
+
+
 def validate_decode_tiles(tile_x, tile_y, tile_stride_x, tile_stride_y, **_kwargs):
     if tile_x <= tile_stride_x:
         return "Decode tile_x must be larger than tile_stride_x."

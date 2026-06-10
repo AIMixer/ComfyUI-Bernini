@@ -22,6 +22,7 @@ from .executor import (
 from .plan import DirectorPlan, plan_summary, prepare_segment_clip, refs_to_kwargs_for_context
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .segment_cache import load_segment_cache, save_segment_cache
+from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-Bernini.director.core")
 
@@ -47,6 +48,7 @@ def execute_director_plan_core(
     apg_eta: float = 1.0,
     apg_momentum: float = 0.0,
     apg_norm_threshold: float = 0.0,
+    clear_vram_between_segments: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], str]:
     """Process every segment with ComfyUI core Bernini conditioning + KSampler."""
     from nodes import VAEDecode
@@ -75,6 +77,8 @@ def execute_director_plan_core(
     output_chunks: list[torch.Tensor] = []
     segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), "", "Execution backend: 官方流 (ComfyUI core)"]
+    if clear_vram_between_segments:
+        reports.append("VRAM: 段间清理显存已开启（段末 + 下段开始前 + context 编码后卸载模型）")
     if plan.run_indices is not None:
         skipped = [i + 1 for i in range(len(all_segments)) if i not in run_indices]
         reports.append(
@@ -148,6 +152,9 @@ def execute_director_plan_core(
             **meta,
         )
 
+        if clear_vram_between_segments:
+            cleanup_segment_vram(enabled=True)
+
         ref_kwargs = refs_to_kwargs_for_context(seg.task_key, seg.refs)
         source_arg = clip_frames if _needs_source_video(seg.task_key) else None
 
@@ -186,6 +193,9 @@ def execute_director_plan_core(
             phase_max=1,
             **meta,
         )
+
+        if clear_vram_between_segments:
+            cleanup_segment_vram(enabled=True)
 
         report_director_progress(
             node_id,
@@ -290,6 +300,10 @@ def execute_director_plan_core(
             except Exception as exc:
                 log.debug("Segment video preview skipped: %s", exc)
 
+        if clear_vram_between_segments:
+            del positive, negative, latent, samples, decoded, clip_frames, source_arg, raw_clip
+            cleanup_segment_vram(enabled=True)
+
         reports.append(
             f"Segment {seg.index + 1}/{len(all_segments)}: {task_hint} "
             f"({target_len} frames, high_seed={high_noise_seed}, low_seed={low_noise_seed})"
@@ -305,6 +319,8 @@ def execute_director_plan_core(
 
     for seg in all_segments:
         if seg.index in run_indices:
+            if clear_vram_between_segments and segment_outputs:
+                cleanup_segment_vram(enabled=True)
             chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
             segment_outputs.append(chunk)
             if plan.export_mode == "all":

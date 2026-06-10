@@ -13,6 +13,7 @@ from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_tas
 from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary
 from ..director.progress import report_director_planning
 from ..task_prompts import task_type_combo_options
+from .director_common import director_perf_inputs
 from .t5_config import resolve_t5_config
 
 log = logging.getLogger("ComfyUI-Bernini")
@@ -153,7 +154,7 @@ class BerniniDirector:
                     {"default": False, "tooltip": "Tiled VAE during context encode (not decode)."},
                 ),
                 "vae_force_offload": ("BOOLEAN", {"default": True, "tooltip": "Offload VAE after context encode."}),
-                "bd_grp_perf": ("BDGROUP", {"default": "性能 Performance"}),
+                **director_perf_inputs(),
                 "enable_teacache": (
                     "BOOLEAN",
                     {
@@ -222,6 +223,7 @@ class BerniniDirector:
         low_noise_extra_args=None,
         tiled_vae=False,
         vae_force_offload=True,
+        clear_vram_between_segments=True,
         enable_teacache=False,
         **kwargs,
     ):
@@ -322,6 +324,7 @@ class BerniniDirector:
             normalization=normalization,
             tiled_vae=tiled_vae,
             vae_force_offload=vae_force_offload,
+            clear_vram_between_segments=clear_vram_between_segments,
         )
 
         is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)

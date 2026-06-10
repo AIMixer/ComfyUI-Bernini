@@ -45,6 +45,17 @@ const HIDDEN_WIDGETS = [
     "task_type", "global_prompt", "frame_rate", "negative_prompt",
 ];
 
+const DIRECTOR_WIDGET_LABELS = {
+    clear_vram_between_segments: "段间清理显存",
+};
+
+function applyDirectorWidgetLabels(node) {
+    for (const w of node.widgets || []) {
+        const label = DIRECTOR_WIDGET_LABELS[w.name];
+        if (label) w.label = label;
+    }
+}
+
 function drawGroupHeader(ctx, node, widget_width, y, H, label) {
     const margin = 10;
     const barH = Math.max(18, H - 4);
@@ -398,6 +409,32 @@ function moveDirectorDomWidgetToEnd(node) {
     if (idx === -1 || idx === node.widgets.length - 1) return;
     node.widgets.splice(idx, 1);
     node.widgets.push(widget);
+}
+
+const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "enable_teacache"];
+
+function moveDirectorPerfWidgetsBeforeTimeline(node) {
+    const dom = node?._directorDomWidget;
+    if (!node?.widgets?.length) return;
+
+    const perfWidgets = PERF_WIDGET_ORDER
+        .map((name) => node.widgets.find((w) => w.name === name))
+        .filter(Boolean);
+    if (!perfWidgets.length) return;
+
+    for (const w of perfWidgets) {
+        const idx = node.widgets.indexOf(w);
+        if (idx !== -1) node.widgets.splice(idx, 1);
+    }
+
+    const insertAt = dom ? node.widgets.indexOf(dom) : -1;
+    const at = insertAt === -1 ? node.widgets.length : insertAt;
+    node.widgets.splice(at, 0, ...perfWidgets);
+}
+
+function finalizeDirectorWidgetOrder(node) {
+    moveDirectorPerfWidgetsBeforeTimeline(node);
+    moveDirectorDomWidgetToEnd(node);
 }
 
 function bindDirectorDomWidgetSizing(node, widget, getEditor) {
@@ -3975,7 +4012,7 @@ app.registerExtension({
     async loadedGraphNode(node) {
         if (isBerniniDirectorNode(node)) normalizeDirectorOutputs(node);
         if (node._directorDomWidget) {
-            moveDirectorDomWidgetToEnd(node);
+            finalizeDirectorWidgetOrder(node);
             ensureDirectorDomWidgetWidth(node);
             bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._berniniEditor);
             initDirectorEditor(node);
@@ -3999,6 +4036,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
             normalizeDirectorOutputs(this);
+            applyDirectorWidgetLabels(this);
             this.size = [1000, 680];
 
             const container = document.createElement("div");
@@ -4025,10 +4063,10 @@ app.registerExtension({
             widget.element = container;
             ensureDirectorDomWidgetWidth(self);
             self._directorDomWidget = widget;
-            moveDirectorDomWidgetToEnd(self);
+            finalizeDirectorWidgetOrder(self);
 
             setTimeout(() => {
-                moveDirectorDomWidgetToEnd(self);
+                finalizeDirectorWidgetOrder(self);
                 initDirectorEditor(self);
             }, 0);
             return r;
@@ -4070,7 +4108,7 @@ app.registerExtension({
             normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
-                moveDirectorDomWidgetToEnd(this);
+                finalizeDirectorWidgetOrder(this);
                 const ed = initDirectorEditor(this) || this._berniniEditor;
                 if (!ed) return;
                 const initTotal = Math.max(0, parseInt(ed.totalFramesWidget?.value || 81, 10));

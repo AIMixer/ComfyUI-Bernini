@@ -9,6 +9,7 @@ from .director_common import (
     finalize_director_outputs,
     prepare_director_plan,
     timeline_required_inputs,
+    director_perf_inputs,
 )
 
 _CATEGORY = "Bernini"
@@ -160,6 +161,7 @@ class BerniniDirectorOfficial:
                         "tooltip": "APG L2 clip threshold — 0 disables APG (official rv2v has no APG).",
                     },
                 ),
+                **director_perf_inputs(),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -221,6 +223,7 @@ class BerniniDirectorOfficial:
         apg_eta=1.0,
         apg_momentum=0.0,
         apg_norm_threshold=0.0,
+        clear_vram_between_segments=True,
         **kwargs,
     ):
         del kwargs  # bd_grp_* headers
@@ -257,6 +260,7 @@ class BerniniDirectorOfficial:
             apg_eta=apg_eta,
             apg_momentum=apg_momentum,
             apg_norm_threshold=apg_norm_threshold,
+            clear_vram_between_segments=clear_vram_between_segments,
         )
 
         return finalize_director_outputs(plan, combined, segment_outputs, report)
