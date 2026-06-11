@@ -78,7 +78,10 @@ def execute_director_plan_core(
     segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), "", "Execution backend: 官方流 (ComfyUI core)"]
     if clear_vram_between_segments:
-        reports.append("VRAM: 段间清理显存已开启（段末 + 下段开始前 + context 编码后卸载模型）")
+        reports.append(
+            "VRAM: 段间清理显存已开启（多段时在 context 编码后卸载模型；"
+            "单段时跳过采样前 unload，避免重载叠峰）"
+        )
     if plan.run_indices is not None:
         skipped = [i + 1 for i in range(len(all_segments)) if i not in run_indices]
         reports.append(
@@ -195,7 +198,7 @@ def execute_director_plan_core(
         )
 
         if clear_vram_between_segments:
-            cleanup_segment_vram(enabled=True)
+            cleanup_segment_vram(enabled=True, unload_models=seg_total > 1)
 
         report_director_progress(
             node_id,

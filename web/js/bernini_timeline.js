@@ -47,6 +47,7 @@ const HIDDEN_WIDGETS = [
 
 const DIRECTOR_WIDGET_LABELS = {
     clear_vram_between_segments: "段间清理显存",
+    export_source_images: "输出原片对比 source_images",
 };
 
 function applyDirectorWidgetLabels(node) {
@@ -259,6 +260,12 @@ function formatProbeFps(value) {
     return fps.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function coerceTimelineFps(value, fallback = 24) {
+    const fps = Number(value);
+    if (!Number.isFinite(fps) || fps <= 0) return coerceTimelineFps(fallback, 24);
+    return Math.round(clamp(fps, 1, 240) * 100) / 100;
+}
+
 async function uploadToInput(file) {
     const body = new FormData();
     body.append("image", file);
@@ -411,7 +418,7 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "enable_teacache"];
+const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "enable_teacache", "export_source_images"];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
     const dom = node?._directorDomWidget;
@@ -502,7 +509,7 @@ function parseTimeline(raw, totalFrames, fps) {
         version: 4,
         editMode: "global",
         totalFrames: total,
-        frameRate: fps || 24,
+        frameRate: coerceTimelineFps(fps || 24),
         video: {
             fileName: "",
             videoFile: "",
@@ -523,6 +530,7 @@ function parseTimeline(raw, totalFrames, fps) {
         const data = JSON.parse(raw);
         data.version = data.version || 4;
         data.editMode = data.editMode || "global";
+        data.frameRate = coerceTimelineFps(data.frameRate ?? fps ?? 24);
         data.video = data.video || { fileName: "", frames: [] };
         if (!data.video.videoFile && data.video.fileName) {
             data.video.videoFile = data.video.fileName;
@@ -590,6 +598,8 @@ function parseTimeline(raw, totalFrames, fps) {
                 width: data.video.width || 0,
                 height: data.video.height || 0,
                 duration: data.video.duration || 0,
+                nativeFps: data.video.nativeFps || data.video.native_fps || 0,
+                nativeFrameCount: data.video.nativeFrameCount || data.video.native_frame_count || 0,
                 sourceFrameCount: data.video.sourceFrameCount || data.video.frameMap?.length || 0,
                 storageWidth: data.video.storageWidth,
                 storageHeight: data.video.storageHeight,
@@ -656,7 +666,7 @@ class BerniniDirectorEditor {
         this.refMaxWidget = this.widget("ref_max_size");
 
         const initTotal = Math.max(0, parseInt(this.totalFramesWidget?.value || 81, 10));
-        const initFps = parseFloat(this.frameRateWidget?.value || 24);
+        const initFps = coerceTimelineFps(this.frameRateWidget?.value || 24);
         this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
         this.buildDOM();
         this.bindEvents();
@@ -765,7 +775,7 @@ class BerniniDirectorEditor {
                 timelineMode: "prompt_batch",
                 editMode: "segment",
                 totalFrames: sumFrameCounts(this.timeline.segments),
-                frameRate: parseFloat(this.frameRateWidget?.value || this.timeline.frameRate || 24),
+                frameRate: this.getFrameRate(),
                 width: this.timeline.output?.width,
                 height: this.timeline.output?.height,
                 global: {
@@ -796,7 +806,7 @@ class BerniniDirectorEditor {
                 version: 5,
                 timelineMode: mode,
                 totalFrames: sumFrameCounts(this.timeline.segments),
-                frameRate: parseFloat(this.frameRateWidget?.value || this.timeline.frameRate || 24),
+                frameRate: this.getFrameRate(),
                 width: this.timeline.output?.width,
                 height: this.timeline.output?.height,
                 refMaxSize: this.timeline.output?.longEdge,
@@ -831,6 +841,7 @@ class BerniniDirectorEditor {
             version: 4,
             timelineMode: "video",
             totalFrames: this.getTotalFrames(),
+            frameRate: this.getFrameRate(),
             videoClips: clips,
             video: {
                 ...video,
@@ -945,6 +956,8 @@ class BerniniDirectorEditor {
                 <label>高</label>
                 <input type="number" class="bd-num" data-r="out-h" min="16" max="8192" step="16" value="480" style="width:56px">
             </span>
+            <label title="上传后默认跟源视频 FPS；修改时会保持真实时长不变并重算帧数（例：30→24fps 时 275 帧→约 220 帧，时长仍约 9.2s）">FPS</label>
+            <input type="number" class="bd-num" data-r="timeline-fps" min="1" max="240" step="0.01" value="24" style="width:64px" title="时间线/导出 FPS">
             <span class="bd-meta" data-r="out-preview">—</span>
             <span class="bd-meta hidden" data-r="out-hint"></span>
             <label title="全部导出：合并为一个视频；分段导出：每段时间轴片段单独输出（images 输出为列表，Video Combine 会生成多个 MP4）">导出方式</label>
@@ -1074,6 +1087,7 @@ class BerniniDirectorEditor {
         this.outLong = this.root.querySelector('[data-r="out-long"]');
         this.outW = this.root.querySelector('[data-r="out-w"]');
         this.outH = this.root.querySelector('[data-r="out-h"]');
+        this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outMaxFrames = this.root.querySelector('[data-r="out-max-frames"]');
         this.outExportMode = this.root.querySelector('[data-r="out-export-mode"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
@@ -1146,6 +1160,11 @@ class BerniniDirectorEditor {
         this.outLong.onchange = () => this.onOutputField("longEdge", +this.outLong.value);
         this.outW.onchange = () => this.onOutputField("width", +this.outW.value);
         this.outH.onchange = () => this.onOutputField("height", +this.outH.value);
+        this.fpsInput.onchange = () => this.onFrameRateChanged(this.fpsInput.value);
+        this.fpsInput.oninput = () => {
+            clearTimeout(this._fpsInputTimer);
+            this._fpsInputTimer = setTimeout(() => this.onFrameRateChanged(this.fpsInput.value), 350);
+        };
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
 
@@ -1236,6 +1255,8 @@ class BerniniDirectorEditor {
                 width: v.width || 0,
                 height: v.height || 0,
                 duration: v.duration || 0,
+                nativeFps: v.nativeFps || v.native_fps || 0,
+                nativeFrameCount: v.nativeFrameCount || v.native_frame_count || 0,
                 sourceFrameCount: v.sourceFrameCount || this.getFrameMap().length,
                 storageWidth: v.storageWidth,
                 storageHeight: v.storageHeight,
@@ -1257,6 +1278,8 @@ class BerniniDirectorEditor {
                     width: v.width || 0,
                     height: v.height || 0,
                     duration: v.duration || 0,
+                    nativeFps: v.nativeFps || v.native_fps || 0,
+                    nativeFrameCount: v.nativeFrameCount || v.native_frame_count || 0,
                     sourceFrameCount: v.sourceFrameCount || this.getFrameMap().length,
                     storageWidth: v.storageWidth,
                     storageHeight: v.storageHeight,
@@ -1782,11 +1805,15 @@ class BerniniDirectorEditor {
             const dim = c.storageWidth && c.storageHeight
                 ? ` · ${c.storageWidth}×${c.storageHeight}`
                 : (this._storageWidth && this._storageHeight ? ` · ${this._storageWidth}×${this._storageHeight}` : "");
-            const fpsHint = c.nativeFps > 0 ? ` · ${formatProbeFps(c.nativeFps)}fps` : "";
-            this.videoNameEl.textContent = `${c.fileName || c.videoFile} (${total}f${fpsHint}${dim})`;
+            const nativeHint = c.nativeFps > 0 ? ` · 源${formatProbeFps(c.nativeFps)}fps` : "";
+            const tlFps = this.getFrameRate();
+            const dur = this.getTimelineDurationSec().toFixed(2);
+            this.videoNameEl.textContent = `${c.fileName || c.videoFile} (${total}f · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s${nativeHint}${dim})`;
             return;
         }
-        this.videoNameEl.textContent = `${clips.length} 段视频 · 共 ${total} 帧`;
+        const tlFps = this.getFrameRate();
+        const dur = this.getTimelineDurationSec().toFixed(2);
+        this.videoNameEl.textContent = `${clips.length} 段视频 · 共 ${total} 帧 · 时间轴${formatProbeFps(tlFps)}fps · ${dur}s`;
     }
 
     getFrameMapEntry(logicalFrame) {
@@ -2005,7 +2032,147 @@ class BerniniDirectorEditor {
     }
 
     getFrameRate() {
-        return parseFloat(this.frameRateWidget?.value || this.timeline.frameRate || 24);
+        return coerceTimelineFps(this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
+    }
+
+    syncFrameRateUI(value = null) {
+        const fps = coerceTimelineFps(value ?? this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
+        this.timeline.frameRate = fps;
+        if (this.frameRateWidget) this.frameRateWidget.value = fps;
+        if (this.fpsInput) this.fpsInput.value = fps;
+        return fps;
+    }
+
+    _clipFrameCountAtFps(clip, fps, fallback = 0) {
+        const nativeFps = Number(clip?.nativeFps || 0);
+        const nativeCount = Number(clip?.nativeFrameCount || 0);
+        if (nativeFps > 0 && nativeCount > 0) {
+            return Math.max(1, Math.round((nativeCount / nativeFps) * fps));
+        }
+        const duration = Number(clip?.duration || 0);
+        if (duration > 0) return Math.max(1, Math.round(duration * fps));
+        return Math.max(1, Math.round(fallback || Number(clip?.sourceFrameCount || 0) || 1));
+    }
+
+    _timelineFrameCountAtFps(fps, oldFps = null, oldTotal = null) {
+        const nextFps = coerceTimelineFps(fps);
+        const prevTotal = Number(oldTotal ?? this.getTotalFrames() ?? 0);
+        const prevFps = coerceTimelineFps(oldFps ?? this.timeline.frameRate ?? this.frameRateWidget?.value ?? 24);
+        // When user changes timeline FPS, preserve wall-clock duration: T = N/fps → N' = T * fps'.
+        if (prevTotal > 0 && oldFps != null && Math.abs(prevFps - nextFps) >= 0.001) {
+            return Math.max(1, Math.round(prevTotal * nextFps / prevFps));
+        }
+        const clips = this.getVideoClips();
+        if (clips.length && clips.some((c) => Number(c.duration || 0) > 0 || Number(c.nativeFrameCount || 0) > 0)) {
+            return clips.reduce((sum, clip) => sum + this._clipFrameCountAtFps(clip, nextFps), 0);
+        }
+        if (prevTotal > 0) {
+            return Math.max(1, Math.round(prevTotal * nextFps / Math.max(prevFps, 0.001)));
+        }
+        return 1;
+    }
+
+    _rescaleSegmentsForTotal(oldTotal, newTotal) {
+        if (!oldTotal || !newTotal || !this.timeline.segments?.length) {
+            this._setSingleSegment(newTotal);
+            return;
+        }
+        const ordered = [...this.timeline.segments].sort((a, b) => a.start - b.start);
+        let cursor = 0;
+        this.timeline.segments = ordered.map((seg, idx) => {
+            const rawStart = idx === 0 ? 0 : Math.round((seg.start / oldTotal) * newTotal);
+            const rawEnd = idx === ordered.length - 1
+                ? newTotal
+                : Math.round(((seg.start + seg.length) / oldTotal) * newTotal);
+            const start = clamp(rawStart, cursor, newTotal);
+            const end = clamp(rawEnd, start + 1, newTotal);
+            cursor = end;
+            return {
+                ...seg,
+                start,
+                length: Math.max(1, end - start),
+                frameCount: Math.max(1, end - start),
+            };
+        });
+    }
+
+    _syncClipFrameCountsForFps(fps, oldFps = null) {
+        const clips = this.getVideoClips();
+        if (!clips.length) return;
+        const prevFps = coerceTimelineFps(oldFps ?? this.timeline.frameRate ?? 24);
+        this.timeline.videoClips = clips.map((clip) => {
+            const fallback = Number(clip.sourceFrameCount || 0) * fps / Math.max(prevFps, 0.001);
+            return { ...clip, sourceFrameCount: this._clipFrameCountAtFps(clip, fps, fallback) };
+        });
+    }
+
+    _resampleFrameMapForFps(oldFps, newFps, newTotal) {
+        const oldTotal = this.getTotalFrames();
+        if (!oldTotal || !newTotal) return [];
+        const oldEntries = Array.from({ length: oldTotal }, (_, i) => this.getFrameMapEntry(i));
+        const clips = this.getVideoClips();
+        const map = [];
+        for (let i = 0; i < newTotal; i++) {
+            const oldLogical = clamp(Math.round((i / newFps) * oldFps), 0, oldTotal - 1);
+            const entry = normalizeFrameMapEntry(oldEntries[oldLogical]);
+            const clip = clips[entry.clip] || clips[0] || {};
+            const maxFrame = this._clipFrameCountAtFps(clip, newFps) - 1;
+            const sourceTime = Number(entry.frame || 0) / Math.max(oldFps, 0.001);
+            map.push({
+                clip: entry.clip,
+                frame: clamp(Math.round(sourceTime * newFps), 0, Math.max(0, maxFrame)),
+            });
+        }
+        return map;
+    }
+
+    _resampleTimelineForFrameRate(oldFps, newFps) {
+        if (this.isImageBatch() || this.isGenMode() || !this.hasVideo()) return;
+        const oldTotal = this.getTotalFrames();
+        const newTotal = this._timelineFrameCountAtFps(newFps, oldFps, oldTotal);
+        const hasExplicitMap = this.getFrameMap().length > 0;
+        const hasSparseDeletes = deletedSourceRanges(this.timeline.video || {}).length > 0;
+
+        if (hasExplicitMap || hasSparseDeletes || this.getVideoClips().length > 1) {
+            const newMap = this._resampleFrameMapForFps(oldFps, newFps, newTotal);
+            this.setFrameMap(newMap);
+            this._syncClipFrameCountsForFps(newFps, oldFps);
+            this._syncPrimaryVideoFromClips(newMap);
+        } else {
+            this._syncClipFrameCountsForFps(newFps, oldFps);
+            this.setSparseVideoFrames(newTotal);
+            this._syncPrimaryVideoFromClips([]);
+        }
+
+        this._rescaleSegmentsForTotal(oldTotal, newTotal);
+        this.currentFrame = clamp(Math.round((this.currentFrame / Math.max(oldTotal, 1)) * newTotal), 0, Math.max(0, newTotal - 1));
+        if (this.totalFramesWidget) this.totalFramesWidget.value = newTotal;
+        if (this.seekBar) {
+            this.seekBar.max = Math.max(0, newTotal - 1);
+            this.seekBar.value = this.currentFrame;
+        }
+        this._thumbCache.clear();
+        this._thumbPending.clear();
+    }
+
+    onFrameRateChanged(value) {
+        const oldFps = coerceTimelineFps(this.timeline.frameRate ?? this.frameRateWidget?.value ?? 24);
+        const newFps = this.syncFrameRateUI(value);
+        if (Math.abs(oldFps - newFps) < 0.001) {
+            this.commit(false, { syncTimeline: true });
+            return;
+        }
+        this._resampleTimelineForFrameRate(oldFps, newFps);
+        this.updateVideoNameLabel();
+        this.updateOutputPreview();
+        this.scheduleRender();
+        this.commit(false, { syncTimeline: true });
+    }
+
+    getTimelineDurationSec() {
+        const total = this.getTotalFrames();
+        const fps = this.getFrameRate();
+        return total / Math.max(fps, 0.001);
     }
 
     isGlobalMode() { return (this.timeline.editMode || "global") === "global"; }
@@ -2096,6 +2263,7 @@ class BerniniDirectorEditor {
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
         if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
+        this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateOutputPreview();
     }
@@ -2144,11 +2312,14 @@ class BerniniDirectorEditor {
     _exportPreviewSuffix() {
         const cap = this.getMaxExportFrames();
         const exportMode = this.timeline.output?.exportMode === "segments" ? " · 分段导出" : "";
-        if (cap <= 0) return exportMode;
+        const dur = this.getTimelineDurationSec().toFixed(2);
+        const fps = formatProbeFps(this.getFrameRate());
+        const timeHint = ` · ${dur}s @ ${fps}fps`;
+        if (cap <= 0) return `${timeHint}${exportMode}`;
         const total = this.getTotalFrames();
         const exportTotal = this.getExportFrameTotal();
-        if (exportTotal >= total) return ` · 导出 ${exportTotal} 帧${exportMode}`;
-        return ` · 导出 ${exportTotal}/${total} 帧${exportMode}`;
+        if (exportTotal >= total) return `${timeHint} · 导出 ${exportTotal} 帧${exportMode}`;
+        return `${timeHint} · 导出 ${exportTotal}/${total} 帧${exportMode}`;
     }
 
     onOutputField(key, value) {
@@ -2726,24 +2897,24 @@ class BerniniDirectorEditor {
         }
         const browserMeta = await this.probeVideoMetadata(viewUrl);
         const nativeFps = Number(serverProbe?.native_fps || 0);
+        const nativeFrameCount = Number(serverProbe?.frame_count || 0);
         const meta = {
             width: Number(serverProbe?.width || browserMeta.width || 0),
             height: Number(serverProbe?.height || browserMeta.height || 0),
             duration: Number(serverProbe?.duration ?? browserMeta.duration ?? 0),
             nativeFps,
+            nativeFrameCount,
             probeMethod: serverProbe?.probe_method || "browser_estimate",
         };
 
         if (syncNativeFps && nativeFps > 0) {
-            const fps = Math.round(nativeFps * 100) / 100;
-            if (this.frameRateWidget) this.frameRateWidget.value = fps;
-            this.timeline.frameRate = fps;
+            this.syncFrameRateUI(nativeFps);
         }
 
         const fps = this.getFrameRate();
         const totalFrames = Math.max(
             1,
-            Number(serverProbe?.frame_count) || Math.round(meta.duration * fps),
+            Math.round(meta.duration * fps) || nativeFrameCount,
         );
 
         const store = resolveOutputDimensions(meta.width, meta.height, this.timeline.output || { mode: "long_edge", longEdge: 848 }, {
@@ -2776,6 +2947,7 @@ class BerniniDirectorEditor {
             height: meta.height,
             duration: meta.duration,
             nativeFps: meta.nativeFps || null,
+            nativeFrameCount: meta.nativeFrameCount || null,
             sourceFrameCount: totalFrames,
             storageWidth: store.width,
             storageHeight: store.height,
@@ -4112,8 +4284,9 @@ app.registerExtension({
                 const ed = initDirectorEditor(this) || this._berniniEditor;
                 if (!ed) return;
                 const initTotal = Math.max(0, parseInt(ed.totalFramesWidget?.value || 81, 10));
-                const initFps = parseFloat(ed.frameRateWidget?.value || 24);
+                const initFps = coerceTimelineFps(ed.frameRateWidget?.value || 24);
                 ed.timeline = parseTimeline(ed.timelineWidget?.value, initTotal, initFps);
+                ed.syncFrameRateUI(ed.timeline.frameRate);
                 ed._directorMode = ed.getDirectorMode();
                 if (ed._directorMode === "video") {
                     ed.restoreVideoFromTimeline();

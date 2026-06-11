@@ -185,14 +185,15 @@ class BerniniDirectorOfficial:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING")
-    RETURN_NAMES = ("images", "audio", "frame_count", "report")
-    OUTPUT_IS_LIST = (True, True, False, False)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT")
+    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
         "Bernini Director with ComfyUI official Bernini path: CLIP text encode + BerniniConditioning "
-        "+ dual-stage KSampler + VAEDecode. Defaults follow Bernini_testing_video_edit_02.json (rv2v)."
+        "+ dual-stage KSampler + VAEDecode. Defaults follow Bernini_testing_video_edit_02.json (rv2v). "
+        "source_images and fps outputs match the KJ Director node."
     )
 
     def execute(
@@ -224,6 +225,7 @@ class BerniniDirectorOfficial:
         apg_momentum=0.0,
         apg_norm_threshold=0.0,
         clear_vram_between_segments=True,
+        export_source_images=False,
         **kwargs,
     ):
         del kwargs  # bd_grp_* headers
@@ -263,4 +265,10 @@ class BerniniDirectorOfficial:
             clear_vram_between_segments=clear_vram_between_segments,
         )
 
-        return finalize_director_outputs(plan, combined, segment_outputs, report)
+        return finalize_director_outputs(
+            plan,
+            combined,
+            segment_outputs,
+            report,
+            export_source_images=export_source_images,
+        )

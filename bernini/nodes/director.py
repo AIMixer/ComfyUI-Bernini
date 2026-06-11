@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import json
-import logging
-
-import torch
-
-from ..director.audio_export import build_director_audio_outputs, task_passes_source_audio
 from ..director.executor import execute_director_plan
-from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
-from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary
-from ..director.progress import report_director_planning
-from ..task_prompts import task_type_combo_options
-from .director_common import director_perf_inputs
+from .director_common import (
+    director_perf_inputs,
+    finalize_director_outputs,
+    prepare_director_plan,
+    validate_decode_tiles,
+)
 from .t5_config import resolve_t5_config
-
-log = logging.getLogger("ComfyUI-Bernini")
+from ..task_prompts import task_type_combo_options
 
 _CATEGORY = "Bernini"
 
@@ -166,23 +160,19 @@ class BerniniDirector:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    @classmethod
-    def VALIDATE_INPUTS(cls, tile_x, tile_y, tile_stride_x, tile_stride_y, **_kwargs):
-        if tile_x <= tile_stride_x:
-            return "Decode tile_x must be larger than tile_stride_x."
-        if tile_y <= tile_stride_y:
-            return "Decode tile_y must be larger than tile_stride_y."
-        return True
+    VALIDATE_INPUTS = validate_decode_tiles
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING")
-    RETURN_NAMES = ("images", "audio", "frame_count", "report")
-    OUTPUT_IS_LIST = (True, True, False, False)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT")
+    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
         "Bernini video director: upload video/refs in-node, split timeline, global or per-segment prompts. "
         "images output (list): one merged clip when export=all; one clip per segment when export=segments "
         "or prompt batch — connect to Video Combine and PreviewImage. "
+        "source_images: timeline source frames aligned with images (enable export in Performance). "
+        "fps: timeline frame rate for Video Combine / CreateVideo. "
         "audio output (v2v / rv2v): source video audio aligned to the export timeline when available. "
         "Separate high-noise / low-noise sampler settings (cfg, seed, force_offload, add_noise, extra_args)."
     )
@@ -224,72 +214,24 @@ class BerniniDirector:
         tiled_vae=False,
         vae_force_offload=True,
         clear_vram_between_segments=True,
+        export_source_images=False,
         enable_teacache=False,
         **kwargs,
     ):
         del kwargs  # bd_grp_* section headers — UI only
         t5 = resolve_t5_config(t5_config)
 
-        if not timeline_data or not timeline_data.strip():
-            timeline_data = json.dumps(
-                {
-                    "version": 4,
-                    "editMode": "global",
-                    "totalFrames": total_frames,
-                    "frameRate": frame_rate,
-                    "width": width,
-                    "height": height,
-                    "refMaxSize": ref_max_size,
-                    "output": {
-                        "mode": "long_edge",
-                        "longEdge": ref_max_size,
-                        "width": width,
-                        "height": height,
-                        "maxExportFrames": 0,
-                        "exportMode": "all",
-                    },
-                    "videoClips": [],
-                    "video": {
-                        "fileName": "",
-                        "videoFile": "",
-                        "subfolder": "",
-                        "type": "input",
-                        "frames": [],
-                        "frameMap": [],
-                    },
-                    "global": {"taskType": task_type, "prompt": global_prompt, "refs": []},
-                    "segments": [
-                        {
-                            "id": "s0",
-                            "start": 0,
-                            "length": total_frames,
-                            "prompt": "",
-                            "taskType": "",
-                            "refs": [],
-                        }
-                    ],
-                },
-                ensure_ascii=False,
-            )
-
-        report_director_planning(
-            unique_id,
-            count_timeline_segments(timeline_data),
-            timeline_segment_total=count_all_timeline_segments(timeline_data),
-        )
-
-        plan = build_director_plan(
-            timeline_data,
-            global_task_type=task_type,
+        plan = prepare_director_plan(
+            timeline_data=timeline_data,
+            task_type=task_type,
             global_prompt=global_prompt,
             total_frames=total_frames,
             frame_rate=frame_rate,
             width=width,
             height=height,
             ref_max_size=ref_max_size,
+            unique_id=unique_id,
         )
-
-        log.info(plan_summary(plan).replace("\n", " | "))
 
         combined, segment_outputs, report = execute_director_plan(
             plan,
@@ -327,58 +269,13 @@ class BerniniDirector:
             clear_vram_between_segments=clear_vram_between_segments,
         )
 
-        is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
-        export_segments = plan.export_mode == "segments"
-        video_batch = is_video_batch_task_key(plan.global_task_key)
-
-        if export_segments or (is_batch and not video_batch):
-            images_out = segment_outputs
-            frame_count = sum(int(s.shape[0]) for s in segment_outputs)
-            if export_segments and len(segment_outputs) > 1:
-                report = (
-                    report
-                    + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output "
-                    "(one MP4 per segment when connected to Video Combine / PreviewImage)."
-                )
-            if plan.run_indices is not None:
-                report = (
-                    report
-                    + f"\n\nPartial run: output contains {len(segment_outputs)} re-generated "
-                    f"{'group(s)' if is_batch else 'segment clip(s)'} only."
-                )
-        else:
-            images_out = [combined]
-            frame_count = int(combined.shape[0])
-            if video_batch and is_batch and len(segment_outputs) > 1:
-                report = (
-                    report
-                    + f"\n\nExport mode: all — merged {frame_count} frame(s) on images output "
-                    "(single clip when connected to Video Combine / PreviewImage)."
-                )
-            if plan.run_indices is not None and video_batch:
-                report = (
-                    report
-                    + f"\n\nPartial run: re-generated {len(segment_outputs)} video group(s); "
-                    "skipped groups merged from cache or source when available."
-                )
-        audio_out = build_director_audio_outputs(
+        return finalize_director_outputs(
             plan,
-            images_out,
-            export_segments=export_segments or (is_batch and not video_batch),
-            output_frame_end=frame_count if not (export_segments or (is_batch and not video_batch)) else None,
+            combined,
+            segment_outputs,
+            report,
+            export_source_images=export_source_images,
         )
-        if task_passes_source_audio(plan.global_task_key):
-            has_audio = any(
-                isinstance(a, dict)
-                and isinstance(a.get("waveform"), torch.Tensor)
-                and int(a["waveform"].numel()) > 0
-                for a in audio_out
-            )
-            if has_audio:
-                report = report + "\n\nSource audio: extracted from input video (connect audio → VHS Video Combine)."
-            else:
-                report = report + "\n\nSource audio: none (input video has no audio track or ffmpeg unavailable)."
-        return (images_out, audio_out, frame_count, report)
 
 
 BerniniDirectorExecute = BerniniDirector

@@ -8,9 +8,12 @@ import logging
 import torch
 
 from ..director.audio_export import build_director_audio_outputs, task_passes_source_audio
+from ..director.frame_align import pad_or_trim_frames
 from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
 from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary
 from ..director.progress import report_director_planning
+from ..image_prep import fit_canvas, fit_video_long_edge
+from ..video_io import load_timeline_segment
 from ..task_prompts import task_type_combo_options
 
 log = logging.getLogger("ComfyUI-Bernini")
@@ -96,6 +99,16 @@ def director_perf_inputs() -> dict:
                 "tooltip": (
                     "段间清理显存：每段结束后卸载已加载模型并清空 CUDA 缓存，"
                     "降低多段峰值显存（段间略慢），从而降低爆显存风险"
+                ),
+            },
+        ),
+        "export_source_images": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "输出 source_images（时间轴原片帧，用于与 images 并排对比）。"
+                    "默认关：跳过二次解码，节省时间与内存；需要对比预览时再开。"
                 ),
             },
         ),
@@ -205,7 +218,43 @@ def prepare_director_plan(
     return plan
 
 
-def finalize_director_outputs(plan, combined, segment_outputs, report):
+def _fit_source_clip_to_plan(plan, raw_clip: torch.Tensor) -> torch.Tensor:
+    """Match Director output dimensions for side-by-side preview."""
+    if plan.output_mode == "fixed":
+        return fit_canvas(raw_clip, plan.width, plan.height)
+    return fit_video_long_edge(raw_clip, plan.ref_max_size)
+
+
+def build_source_images_output(
+    plan,
+    images_out: list[torch.Tensor],
+    *,
+    split_outputs: bool,
+) -> list[torch.Tensor]:
+    """Expose source frames from the Director timeline, aligned with generated image outputs."""
+    if split_outputs:
+        chunks: list[torch.Tensor] = []
+        for seg, generated in zip(plan.segments, images_out):
+            target_len = int(generated.shape[0])
+            raw = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
+            fitted = _fit_source_clip_to_plan(plan, raw)
+            chunks.append(pad_or_trim_frames(fitted, target_len).cpu().float())
+        return chunks
+
+    target_len = int(images_out[0].shape[0]) if images_out else int(plan.total_frames or 0)
+    raw = load_timeline_segment(plan.raw, 0, target_len)
+    fitted = _fit_source_clip_to_plan(plan, raw)
+    return [pad_or_trim_frames(fitted, target_len).cpu().float()]
+
+
+def finalize_director_outputs(
+    plan,
+    combined,
+    segment_outputs,
+    report,
+    *,
+    export_source_images: bool = False,
+):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
     video_batch = is_video_batch_task_key(plan.global_task_key)
@@ -226,6 +275,7 @@ def finalize_director_outputs(plan, combined, segment_outputs, report):
                 f"{'group(s)' if is_batch else 'segment clip(s)'} only."
             )
     else:
+        combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
         images_out = [combined]
         frame_count = int(combined.shape[0])
         if video_batch and is_batch and len(segment_outputs) > 1:
@@ -258,4 +308,21 @@ def finalize_director_outputs(plan, combined, segment_outputs, report):
             report = report + "\n\nSource audio: extracted from input video (connect audio → VHS Video Combine)."
         else:
             report = report + "\n\nSource audio: none (input video has no audio track or ffmpeg unavailable)."
-    return images_out, audio_out, frame_count, report
+
+    split_source_outputs = export_segments or (is_batch and not video_batch)
+    if export_source_images:
+        try:
+            source_images_out = build_source_images_output(
+                plan,
+                images_out,
+                split_outputs=split_source_outputs,
+            )
+        except Exception as exc:
+            log.warning("Source images output failed: %s", exc)
+            source_images_out = images_out
+            report = report + f"\n\nSource images: fallback to generated output ({exc})."
+    else:
+        source_images_out = []
+
+    fps_out = float(plan.frame_rate or 24.0)
+    return images_out, audio_out, frame_count, report, source_images_out, fps_out

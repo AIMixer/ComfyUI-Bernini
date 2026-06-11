@@ -8,12 +8,14 @@ import torch
 
 from ..audio_io import extract_timeline_audio
 
+SILENT_SAMPLE_RATE = 44100
+
 
 def task_passes_source_audio(task_key: str) -> bool:
     return task_key in {"v2v", "rv2v"}
 
 
-def empty_audio_dict(sample_rate: int = 44100) -> dict[str, Any]:
+def empty_audio_dict(sample_rate: int = SILENT_SAMPLE_RATE) -> dict[str, Any]:
     """Silent placeholder — ComfyUI AUDIO outputs must not be None."""
     return {"waveform": torch.zeros(1, 1, 0), "sample_rate": int(sample_rate)}
 
@@ -35,9 +37,10 @@ def build_director_audio_outputs(
     output_frame_end: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return one AUDIO dict per images_out entry (never None)."""
-    fps = int(plan.frame_rate or 24)
+    fps = float(plan.frame_rate or 24.0)
+    silent_sample_rate = SILENT_SAMPLE_RATE
     if not task_passes_source_audio(plan.global_task_key):
-        return [empty_audio_dict(fps) for _ in images_out]
+        return [empty_audio_dict(silent_sample_rate) for _ in images_out]
 
     timeline = plan.raw or {}
 
@@ -49,18 +52,18 @@ def build_director_audio_outputs(
         outputs: list[dict[str, Any]] = []
         for i, _tensor in enumerate(images_out):
             if i >= len(seg_indices):
-                outputs.append(empty_audio_dict(fps))
+                outputs.append(empty_audio_dict(silent_sample_rate))
                 continue
             seg = plan.segments[seg_indices[i]]
             outputs.append(
                 _coerce_audio_output(
                     extract_timeline_audio(timeline, seg.start_frame, seg.end_frame, fps),
-                    sample_rate=fps,
+                    sample_rate=silent_sample_rate,
                 )
             )
         return outputs
 
     end = max(0, int(output_frame_end if output_frame_end is not None else plan.total_frames))
     audio = extract_timeline_audio(timeline, 0, end, fps) if end > 0 else None
-    merged = _coerce_audio_output(audio, sample_rate=fps)
-    return [merged] if len(images_out) == 1 else [empty_audio_dict(fps) for _ in images_out]
+    merged = _coerce_audio_output(audio, sample_rate=silent_sample_rate)
+    return [merged] if len(images_out) == 1 else [empty_audio_dict(silent_sample_rate) for _ in images_out]

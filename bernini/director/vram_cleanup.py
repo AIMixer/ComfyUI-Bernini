@@ -8,8 +8,8 @@ import logging
 log = logging.getLogger("ComfyUI-Bernini.director.vram")
 
 
-def cleanup_segment_vram(*, enabled: bool = True) -> None:
-    """Release segment GPU memory: gc, unload ComfyUI models, empty CUDA cache."""
+def cleanup_segment_vram(*, enabled: bool = True, unload_models: bool = True) -> None:
+    """Release segment GPU memory: gc, optional unload of ComfyUI models, empty CUDA cache."""
     if not enabled:
         return
     gc.collect()
@@ -17,10 +17,14 @@ def cleanup_segment_vram(*, enabled: bool = True) -> None:
         import comfy.model_management as mm
 
         mm.cleanup_models_gc()
-        mm.unload_all_models()
-        mm.cleanup_models()
+        if unload_models:
+            mm.unload_all_models()
+            mm.cleanup_models()
         mm.soft_empty_cache()
     except Exception as exc:
         log.warning("Segment VRAM cleanup failed: %s", exc)
         return
-    log.debug("Bernini Director: segment VRAM cleanup (models unloaded, cache cleared)")
+    if unload_models:
+        log.debug("Bernini Director: segment VRAM cleanup (models unloaded, cache cleared)")
+    else:
+        log.debug("Bernini Director: segment VRAM cleanup (cache cleared, models kept loaded)")

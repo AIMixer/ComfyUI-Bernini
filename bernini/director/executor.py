@@ -13,6 +13,7 @@ from ...engine.bernini_core_nodes import WanVideoDecode
 from ...engine.nodes_sampler import WanVideoSamplerv2
 
 from ..video_io import load_timeline_segment
+from .frame_align import pad_or_trim_frames
 from .plan import (
     DirectorPlan,
     plan_summary,
@@ -58,8 +59,7 @@ def _source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
         clip = fit_canvas(raw_clip, plan.width, plan.height)
     else:
         clip = fit_video_long_edge(raw_clip, plan.ref_max_size)
-    clip, _ = prepare_segment_clip(clip, target_len)
-    return clip.cpu().float()
+    return pad_or_trim_frames(clip, target_len).cpu().float()
 
 
 def _segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
@@ -154,7 +154,10 @@ def execute_director_plan(
     segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), ""]
     if clear_vram_between_segments:
-        reports.append("VRAM: 段间清理显存已开启（段末 + 下段开始前 + context 编码后卸载模型）")
+        reports.append(
+            "VRAM: 段间清理显存已开启（多段时在 context 编码后卸载模型；"
+            "单段时跳过采样前 unload，避免重载叠峰）"
+        )
     if plan.run_indices is not None:
         skipped = [i + 1 for i in range(len(all_segments)) if i not in run_indices]
         reports.append(
@@ -278,7 +281,8 @@ def execute_director_plan(
         )
 
         if clear_vram_between_segments:
-            cleanup_segment_vram(enabled=True)
+            # Single-segment runs: keep models loaded through context → sampling (avoids reload OOM).
+            cleanup_segment_vram(enabled=True, unload_models=seg_total > 1)
 
         report_director_progress(
             node_id,
@@ -442,6 +446,7 @@ def execute_director_plan(
 
         cached = load_segment_cache(node_id, seg, plan)
         if cached is not None:
+            cached = pad_or_trim_frames(cached, seg.frame_count).cpu().float()
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: "
                 f"loaded from cache ({cached.shape[0]} frames)"
