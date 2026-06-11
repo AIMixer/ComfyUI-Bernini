@@ -122,25 +122,19 @@ def _load_gen_image_tensor(ref: dict) -> torch.Tensor:
 
 def _build_i2v_source_clip(
     img: torch.Tensor,
-    frame_count: int,
+    _frame_count: int,
     *,
     width: int,
     height: int,
     output_mode: str,
     ref_max_size: int,
 ) -> torch.Tensor:
-    """Frame 0 = source image; remaining frames = gray canvas (source video context)."""
+    """Use the source image as a one-frame source-video context."""
     if img.ndim == 3:
         img = img.unsqueeze(0)
     if output_mode == "fixed":
-        first = fit_canvas(img, width, height)
-    else:
-        first = fit_video_long_edge(img, ref_max_size)
-    if frame_count <= 1:
-        return first
-    h, w = int(first.shape[1]), int(first.shape[2])
-    gray_tail = torch.full((frame_count - 1, h, w, 3), 0.5, dtype=torch.float32)
-    return torch.cat([first, gray_tail], dim=0)
+        return fit_canvas(img, width, height)
+    return fit_video_long_edge(img, ref_max_size)
 
 
 def _resolve_gen_image_source_dims(
@@ -385,7 +379,7 @@ def build_gen_director_plan(
             )
         )
 
-    total = int(source_video.shape[0])
+    total = int(segment_ranges[-1][1]) if segment_ranges else int(source_video.shape[0])
     if is_prompt_batch_timeline(timeline, task_key):
         timeline_mode = "prompt_batch"
     else:

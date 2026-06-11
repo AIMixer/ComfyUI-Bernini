@@ -6,7 +6,7 @@ export const PROMPT_BATCH_TASKS = new Set([...IMAGE_BATCH_TASKS, ...VIDEO_BATCH_
 
 /** Shown when task_type is i2v — Bernini upstream has no dedicated i2v testcase/demo. */
 export const I2V_EXPERIMENTAL_NOTICE =
-    "⚠ 实验性功能：Bernini 官方未提供 i2v 专用示例与效果演示；当前为源图首帧锚点 + source 上下文生成，效果可能与预期有差异。";
+    "⚠ 实验性功能：Bernini 官方未提供 i2v 专用示例与效果演示；当前将源图作为单帧视频作为上下文生成，效果可能与预期有差异。";
 
 export function resolveTaskKey(taskTypeValue) {
     let value = String(taskTypeValue || "").split(",[object Object]", 1)[0].trim();
@@ -84,7 +84,7 @@ export function genLayoutHint(taskKey) {
         case "r2i": return "参考主体生图 · 每组最多 5 张参考图 · 全部导出至 images · 选择运行";
         case "t2v": return "文生视频 · 多组提示词 · 每组可设帧数 · 固定宽高 · 支持全部/分段导出 · 选择运行";
         case "r2v": return "参考主体生视频 · 每组最多 5 张参考图 · 每组可设帧数 · 支持全部/分段导出 · 选择运行";
-        case "i2v": return "图生视频 · 实验性功能 · 源图首帧锚点 · 每组可设帧数 · 支持全部/分段导出 · 选择运行";
+        case "i2v": return "图生视频 · 实验性功能 · 单帧视频输入 · 每组可设帧数 · 支持全部/分段导出 · 选择运行";
         default: return "";
     }
 }

@@ -48,7 +48,7 @@ TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
         "i2v",
         "图生视频(Image to Video) [实验性]",
         "You are a helpful assistant specialized in image-to-video generation.",
-        "【实验性功能】Bernini 官方未提供 i2v 专用示例；源图作为首帧锚点 + 灰画布 source 上下文生成视频。",
+        "【实验性功能】Bernini 官方未提供 i2v 专用示例；源图作为单帧视频作为上下文生成视频。",
     ),
     TaskPromptSpec(
         "v2v",

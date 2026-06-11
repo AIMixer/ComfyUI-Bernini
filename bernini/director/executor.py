@@ -19,6 +19,7 @@ from .plan import (
     plan_summary,
     prepare_segment_clip,
     refs_to_kwargs_for_context,
+    wan_align_frame_count,
 )
 from .segment_cache import load_segment_cache, save_segment_cache
 from .vram_cleanup import cleanup_segment_vram
@@ -189,14 +190,18 @@ def execute_director_plan(
         )
 
         raw_clip = _resolve_segment_raw_clip(plan, seg)
-        target_len = raw_clip.shape[0]
+        is_one_frame_i2v = seg.task_key == "i2v" and seg.source_clip is not None
+        target_len = max(1, seg.frame_count or raw_clip.shape[0]) if is_one_frame_i2v else raw_clip.shape[0]
         if seg.source_clip is not None:
             clip = raw_clip
         elif plan.output_mode == "fixed":
             clip = fit_canvas(raw_clip, plan.width, plan.height)
         else:
             clip = fit_video_long_edge(raw_clip, plan.ref_max_size)
-        clip, num_frames = prepare_segment_clip(clip, target_len)
+        if is_one_frame_i2v:
+            num_frames = wan_align_frame_count(target_len)
+        else:
+            clip, num_frames = prepare_segment_clip(clip, target_len)
 
         report_director_progress(
             node_id,

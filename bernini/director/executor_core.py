@@ -19,7 +19,7 @@ from .executor import (
     _source_passthrough_chunk,
     _tensor_frame_to_jpeg_b64,
 )
-from .plan import DirectorPlan, plan_summary, prepare_segment_clip, refs_to_kwargs_for_context
+from .plan import DirectorPlan, plan_summary, prepare_segment_clip, refs_to_kwargs_for_context, wan_align_frame_count
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .segment_cache import load_segment_cache, save_segment_cache
 from .vram_cleanup import cleanup_segment_vram
@@ -108,14 +108,18 @@ def execute_director_plan_core(
         )
 
         raw_clip = _resolve_segment_raw_clip(plan, seg)
-        target_len = raw_clip.shape[0]
+        is_one_frame_i2v = seg.task_key == "i2v" and seg.source_clip is not None
+        target_len = max(1, seg.frame_count or raw_clip.shape[0]) if is_one_frame_i2v else raw_clip.shape[0]
         if seg.source_clip is not None:
             clip_frames = raw_clip
         elif plan.output_mode == "fixed":
             clip_frames = fit_canvas(raw_clip, plan.width, plan.height)
         else:
             clip_frames = fit_video_long_edge(raw_clip, plan.ref_max_size)
-        clip_frames, num_frames = prepare_segment_clip(clip_frames, target_len)
+        if is_one_frame_i2v:
+            num_frames = wan_align_frame_count(target_len)
+        else:
+            clip_frames, num_frames = prepare_segment_clip(clip_frames, target_len)
 
         report_director_progress(
             node_id,
