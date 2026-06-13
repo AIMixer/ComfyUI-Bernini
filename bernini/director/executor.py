@@ -18,6 +18,7 @@ from .plan import (
     DirectorPlan,
     plan_summary,
     prepare_segment_clip,
+    reference_video_for_segment,
     refs_to_kwargs_for_context,
     wan_align_frame_count,
 )
@@ -249,6 +250,7 @@ def execute_director_plan(
 
         ref_kwargs = refs_to_kwargs_for_context(seg.task_key, seg.refs)
         source_arg = clip if _needs_source_video(seg.task_key) else None
+        ref_video_arg = reference_video_for_segment(plan, seg, num_frames)
 
         if clip is not None and clip.shape[0] > 0:
             ctx_h, ctx_w = int(clip.shape[1]), int(clip.shape[2])
@@ -270,6 +272,7 @@ def execute_director_plan(
             height=ctx_h,
             num_frames=num_frames,
             source_video=source_arg,
+            reference_video=ref_video_arg,
             ref_max_size=plan.ref_max_size,
             tiled_vae=tiled_vae,
             force_offload=vae_force_offload,

@@ -10,8 +10,10 @@ export const I2V_EXPERIMENTAL_NOTICE =
 
 export function resolveTaskKey(taskTypeValue) {
     let value = String(taskTypeValue || "").split(",[object Object]", 1)[0].trim();
-    if (value.includes(" — ")) value = value.split(" — ", 1)[0].trim();
     if (value.includes(" · ")) value = value.split(" · ", 1)[0].trim();
+    for (const sep of [" — ", " —— ", " - ", " – "]) {
+        if (value.includes(sep)) return value.split(sep, 1)[0].trim();
+    }
     return value || "rv2v";
 }
 
@@ -53,9 +55,15 @@ export function imageBatchRequiresFixedOutput(taskKey) {
 /** Maximum frames per diffusion segment (model / VRAM practical limit). */
 export const MAX_GEN_FRAMES = 512;
 
-/** v2v uses source video only — no reference image slots (image0–4). */
+/** v2v / mv2v / ads2v — no reference image slots (image0–4); ads2v uses reference video. */
+const NO_REF_IMAGE_TASKS = new Set(["v2v", "mv2v", "ads2v"]);
+
 export function taskUsesReferenceImages(taskKey) {
-    return taskKey !== "v2v";
+    return !NO_REF_IMAGE_TASKS.has(taskKey);
+}
+
+export function taskUsesReferenceVideo(taskKey) {
+    return taskKey === "ads2v";
 }
 
 export function defaultFrameCount(taskKey) {

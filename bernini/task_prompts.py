@@ -97,8 +97,8 @@ TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
 TASK_PROMPT_BY_KEY = {spec.key: spec for spec in TASK_PROMPT_SPECS}
 _ALL_SYSTEM_PROMPTS = tuple(spec.system_prompt for spec in TASK_PROMPT_SPECS)
 
-# Hidden from task_type combo until supported in a future release (specs kept for prompt resolution).
-HIDDEN_TASK_TYPE_KEYS = frozenset({"vi2v", "ads2v", "vrc2v", "mv2v"})
+# Reserved for future task types not yet exposed in the Director UI (specs kept for prompt resolution).
+HIDDEN_TASK_TYPE_KEYS: frozenset[str] = frozenset()
 
 
 def task_type_option_label(spec: TaskPromptSpec) -> str:
@@ -126,8 +126,9 @@ def resolve_task_key(task_type_value: str) -> str:
     value = task_type_value.split(",[object Object]", 1)[0].strip()
     if " · " in value:
         value = value.split(" · ", 1)[0].strip()
-    if " — " in value:
-        return value.split(" — ", 1)[0].strip()
+    for sep in (" — ", " —— ", " - ", " – "):
+        if sep in value:
+            return value.split(sep, 1)[0].strip()
     return value
 
 
@@ -152,3 +153,4 @@ def apply_task_system_prompt(task_type_value: str, positive_prompt: str) -> str:
             user_prompt = user_prompt[len(known) :].lstrip()
             break
     return f"{system_prompt} {user_prompt}"
+ 

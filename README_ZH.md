@@ -135,6 +135,10 @@
 | `bernini_director_minimal_test (i2i).json` | `i2i` | 导演台 · 图生图 · 多组提示词 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v).json` | `rv2v` | 导演台 · 参考图 + 源视频编辑 | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v)).json` | `rv2v` | 导演台 · 参考图 + 源视频编辑（备用文件名） | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (vi2v) .json` | `vi2v` | 导演台 · 内容延展改视频 · 源视频 + 参考图 **更新** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (vrc2v) .json` | `vrc2v` | 导演台 · 主体位置动作微调 · 源视频 + 参考图 **新增** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (mv2v) .json` | `mv2v` | 导演台 · 全参数精细化改视频 · 源视频 prompt 编辑 **更新** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (ads2v).json` | `ads2v` | 导演台 · 广告植入 · 源视频 + 参考视频 **更新** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_v2v_1.json` | `v2v` | **官方导演台** · v2v 单段冒烟（上传源视频 + 全局 prompt） **新增** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_v2v_2.json` | `v2v` | **官方导演台** · v2v 多段均分（10 段 / 344 帧示例，如换发色） **新增** | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_rv2v.json` | `rv2v` | **官方导演台** · 源视频 + 参考图（对齐 PR #14216 官方 rv2v 示例） | [comfyit.cn/article/489](https://comfyit.cn/article/489) |

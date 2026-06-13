@@ -90,6 +90,10 @@ Download **Bernini model weights + example JSON workflows** from [Comfyit: Berni
 | `bernini_director_minimal_test (i2v) .json` | `i2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (i2i).json` | `i2i` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_minimal_test (rv2v).json` | `rv2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (vi2v) .json` | `vi2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (vrc2v) .json` | `vrc2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (mv2v) .json` | `mv2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
+| `bernini_director_minimal_test (ads2v).json` | `ads2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_v2v_1.json` | `v2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_v2v_2.json` | `v2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |
 | `bernini_director_official_core_rv2v.json` | `rv2v` | [comfyit.cn/article/489](https://comfyit.cn/article/489) |

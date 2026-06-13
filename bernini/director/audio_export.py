@@ -1,4 +1,4 @@
-"""Build ComfyUI AUDIO outputs for Bernini Director v2v / rv2v runs."""
+"""Build ComfyUI AUDIO outputs for Bernini Director source-video edit runs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ SILENT_SAMPLE_RATE = 44100
 
 
 def task_passes_source_audio(task_key: str) -> bool:
-    return task_key in {"v2v", "rv2v"}
+    return task_key in {"v2v", "mv2v", "rv2v", "vi2v", "vrc2v", "ads2v"}
 
 
 def empty_audio_dict(sample_rate: int = SILENT_SAMPLE_RATE) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from ..ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..image_prep import resolve_output_dimensions
 from ..task_prompts import get_task_prompt_spec, resolve_task_key
 from ..video_io import (
+    load_reference_video_clip,
     logical_frame_count,
     logical_frame_map,
     load_timeline_segment,
@@ -51,6 +52,8 @@ class SegmentPlan:
     task_key: str
     use_global: bool
     refs: list[SegmentRef] = field(default_factory=list)
+    reference_video_meta: dict = field(default_factory=dict)
+    reference_video_start_frame: int = 0
     negative_prompt: str = ""
     source_clip: torch.Tensor | None = None
 
@@ -85,6 +88,34 @@ class DirectorPlan:
     @property
     def segment_count(self) -> int:
         return len(self.segments)
+
+
+def _ref_video_has_file(ref_block: dict | None) -> bool:
+    if not ref_block:
+        return False
+    return bool((ref_block.get("videoFile") or ref_block.get("fileName") or "").strip())
+
+
+def _continuous_reference_enabled(timeline: dict, edit_mode: str, task_key: str) -> bool:
+    """Global ads2v only: align reference video timeline offset with each segment start."""
+    if edit_mode != "global" or task_key != "ads2v":
+        return False
+    global_block = timeline.get("global") or {}
+    return bool(
+        global_block.get("continuousReference")
+        or global_block.get("continuous_reference")
+        or timeline.get("continuousReference")
+        or timeline.get("continuous_reference")
+    )
+
+
+def _resolve_global_reference_video(timeline: dict) -> dict:
+    global_block = timeline.get("global") or {}
+    ref = global_block.get("referenceVideo") or global_block.get("reference_video") or {}
+    if _ref_video_has_file(ref):
+        return dict(ref)
+    legacy = timeline.get("referenceVideo") or timeline.get("reference_video") or {}
+    return dict(legacy) if isinstance(legacy, dict) else {}
 
 
 def wan_align_frame_count(frame_count: int) -> int:
@@ -318,6 +349,7 @@ def build_director_plan(
     task_type = global_block.get("taskType") or global_task_type or "rv2v — 参考素材改视频"
     prompt = global_block.get("prompt") or global_prompt or ""
     global_refs = _load_refs(global_block.get("refs") or [])
+    global_ref_video = _resolve_global_reference_video(timeline)
 
     task_key_early = resolve_task_key(task_type)
     if is_gen_timeline(timeline, task_key_early):
@@ -382,21 +414,25 @@ def build_director_plan(
     segment_ranges = _segment_ranges_from_timeline(timeline, source_total or total)
     segment_ranges = _clip_segment_ranges(segment_ranges, total)
     segments: list[SegmentPlan] = []
+    continuous_ref = _continuous_reference_enabled(timeline, edit_mode, resolve_task_key(task_type))
 
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
         if edit_mode == "global":
             seg_prompt = prompt
             seg_task = task_type
             seg_refs = list(global_refs)
+            seg_ref_video = dict(global_ref_video)
             use_global = True
         else:
             use_global = False
             seg_prompt = (seg_data.get("prompt") or "").strip() or prompt
             seg_task = seg_data.get("taskType") or seg_data.get("task_type") or task_type
             seg_refs = _load_refs(seg_data.get("refs") or [])
+            seg_ref_video = dict(seg_data.get("referenceVideo") or seg_data.get("reference_video") or {})
 
         seg_task_key = resolve_task_key(seg_task)
         seg_refs = segment_refs_for_context(seg_task_key, seg_refs)
+        ref_start = start if continuous_ref and seg_task_key == "ads2v" else 0
 
         segments.append(
             SegmentPlan(
@@ -408,7 +444,19 @@ def build_director_plan(
                 task_key=seg_task_key,
                 use_global=use_global,
                 refs=seg_refs,
+                reference_video_meta=seg_ref_video,
+                reference_video_start_frame=ref_start,
             )
+        )
+
+    for seg in segments:
+        if seg.task_key != "ads2v":
+            continue
+        if _ref_video_has_file(seg.reference_video_meta):
+            continue
+        raise ValueError(
+            f"ads2v (广告植入) segment #{seg.index + 1} requires a reference video. "
+            "Upload the content-to-insert clip for this segment in the Director node UI."
         )
 
     return DirectorPlan(
@@ -454,8 +502,8 @@ def prepare_segment_clip(clip: torch.Tensor, target_frames: int) -> tuple[torch.
     return clip, num_frames
 
 
-# v2v / i2v: source video only — reference images (image0–4) are not used in context_latents.
-CONTEXT_REFERENCE_EXCLUDED_KEYS = frozenset({"v2v", "i2v"})
+# v2v / mv2v / i2v / ads2v: no reference images in context_latents (ads2v uses reference_video).
+CONTEXT_REFERENCE_EXCLUDED_KEYS = frozenset({"v2v", "mv2v", "i2v", "ads2v"})
 
 
 def segment_refs_for_context(task_key: str, refs: list[SegmentRef]) -> list[SegmentRef]:
@@ -466,6 +514,20 @@ def segment_refs_for_context(task_key: str, refs: list[SegmentRef]) -> list[Segm
 
 def refs_to_kwargs(refs: list[SegmentRef]) -> dict[str, torch.Tensor]:
     return {f"{REF_IMAGE_KEY_PREFIX}{ref.index}": ref.tensor for ref in refs}
+
+
+def reference_video_for_segment(plan: DirectorPlan, seg: SegmentPlan, num_frames: int) -> torch.Tensor | None:
+    """Reference motion clip for ads2v, aligned to the segment frame count."""
+    if seg.task_key != "ads2v":
+        return None
+    if not _ref_video_has_file(seg.reference_video_meta):
+        return None
+    return load_reference_video_clip(
+        seg.reference_video_meta,
+        plan.raw,
+        num_frames,
+        start_frame=seg.reference_video_start_frame,
+    )
 
 
 def refs_to_kwargs_for_context(task_key: str, refs: list[SegmentRef]) -> dict[str, torch.Tensor]:

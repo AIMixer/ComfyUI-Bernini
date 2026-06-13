@@ -159,7 +159,7 @@ def default_timeline_json(
                 "frames": [],
                 "frameMap": [],
             },
-            "global": {"taskType": task_type, "prompt": global_prompt, "refs": []},
+            "global": {"taskType": task_type, "prompt": global_prompt, "refs": [], "referenceVideo": {}, "continuousReference": False},
             "segments": [
                 {
                     "id": "s0",
@@ -168,6 +168,7 @@ def default_timeline_json(
                     "prompt": "",
                     "taskType": "",
                     "refs": [],
+                    "referenceVideo": {},
                 }
             ],
         },

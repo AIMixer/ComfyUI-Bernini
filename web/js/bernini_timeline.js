@@ -13,6 +13,7 @@ import {
     resolveTaskKey,
     sumFrameCounts,
     taskUsesReferenceImages,
+    taskUsesReferenceVideo,
 } from "./bernini_gen_timeline.js";
 import {
     IMAGE_BATCH_STYLES,
@@ -194,9 +195,21 @@ const STYLES = `
 .bd-run-bar-sub .bd-run-bar-fill{background:linear-gradient(90deg,#3a5080,#7a9cff)}
 .hidden{display:none!important}
 .bd-controls.hidden{display:none!important}
-.bd-gen-src{width:100%;min-height:72px;max-height:100px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:10px;margin-top:4px}
+.bd-gen-src{width:100%;min-height:72px;max-height:100px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:10px;margin-top:4px;position:relative;box-sizing:border-box}
 .bd-gen-src.has-img{border-style:solid;border-color:#444}
 .bd-gen-src img{width:100%;height:100%;object-fit:contain;background:#000}
+.bd-gen-src .x{position:absolute;top:1px;right:3px;color:#f88;font-size:12px;line-height:1;display:none;cursor:pointer;z-index:2}
+.bd-gen-src.has-img:hover .x{display:block}
+.bd-gen-src.has-video{padding:0;cursor:default;align-items:stretch;justify-content:flex-start;flex-direction:column}
+.bd-gen-src.has-video .bd-ref-video-preview{width:100%;flex:1;min-height:100px;max-height:220px;object-fit:contain;background:#000;display:block;border-radius:3px}
+.bd-gen-src .bd-ref-replace{position:absolute;bottom:4px;left:4px;z-index:3;background:rgba(0,0,0,.72);color:#ccc;border:1px solid #555;border-radius:3px;padding:2px 7px;font-size:9px;cursor:pointer;line-height:1.4}
+.bd-gen-src .bd-ref-replace:hover{color:#fff;border-color:#888}
+.bd-gen-src.has-video .x{display:block;z-index:3}
+.bd-ref-video-col{display:flex;flex-direction:column;gap:4px;min-width:0;width:100%;flex:1}
+.bd-ref-video-col .bd-gen-src{min-height:140px;max-height:none;flex:1}
+.bd-ref-video-name{word-break:break-all;line-height:1.3}
+.bd-continuous-ref{display:flex;align-items:center;gap:6px;font-size:10px;color:#aaa;cursor:pointer;user-select:none;margin-top:2px}
+.bd-continuous-ref input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-gen-fc-row{display:flex;align-items:center;gap:6px;margin-top:6px}
 ${IMAGE_BATCH_STYLES}
 @media(max-width:480px){
@@ -519,11 +532,11 @@ function parseTimeline(raw, totalFrames, fps) {
             frameMap: [],
         },
         videoClips: [],
-        global: { taskType: "", prompt: "", refs: [] },
+        global: { taskType: "", prompt: "", refs: [], referenceVideo: {}, continuousReference: false },
         output: { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" },
         runSelectEnabled: false,
         runSelection: [],
-        segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }],
+        segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }],
     };
     if (!raw?.trim()) return base;
     try {
@@ -538,7 +551,16 @@ function parseTimeline(raw, totalFrames, fps) {
         data.video.type = data.video.type || "input";
         data.video.subfolder = data.video.subfolder || "";
         data.video.frames = data.video.frames || [];
-        data.global = data.global || { refs: [] };
+        data.global = data.global || { refs: [], referenceVideo: {}, continuousReference: false };
+        data.global.referenceVideo = data.global.referenceVideo || data.global.reference_video || {};
+        data.global.continuousReference = !!data.global.continuousReference || !!data.global.continuous_reference;
+        const legacyRef = data.referenceVideo || data.reference_video;
+        if (legacyRef && (legacyRef.videoFile || legacyRef.fileName)
+            && !(data.global.referenceVideo.videoFile || data.global.referenceVideo.fileName)) {
+            data.global.referenceVideo = { ...legacyRef };
+        }
+        delete data.referenceVideo;
+        delete data.reference_video;
         data.output = {
             mode: data.output?.mode || "long_edge",
             longEdge: data.output?.longEdge ?? data.output?.long_edge ?? data.refMaxSize ?? 848,
@@ -557,13 +579,14 @@ function parseTimeline(raw, totalFrames, fps) {
         }
         if (!data.segments?.length) {
             const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
-            data.segments = [{ id: uid(), start: 0, length: Math.max(MIN_SEG, n), prompt: "", taskType: "", refs: [] }];
+            data.segments = [{ id: uid(), start: 0, length: Math.max(MIN_SEG, n), prompt: "", taskType: "", refs: [], referenceVideo: {} }];
         }
         for (const seg of data.segments) {
             if (!seg.id) seg.id = uid();
             if (seg.length == null && seg.end != null) seg.length = seg.end - seg.start;
             if (seg.frameCount == null && seg.length != null) seg.frameCount = seg.length;
             seg.refs = seg.refs || [];
+            seg.referenceVideo = seg.referenceVideo || seg.reference_video || {};
             seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
             seg.negativePrompt = seg.negativePrompt ?? "";
         }
@@ -836,13 +859,25 @@ class BerniniDirectorEditor {
             storageWidth: storageW,
             storageHeight: storageH,
         }));
+        const { referenceVideo: _legacyRefVideo, reference_video: _legacyRefVideo2, ...timelineBody } = this.timeline;
         return {
-            ...this.timeline,
+            ...timelineBody,
             version: 4,
             timelineMode: "video",
             totalFrames: this.getTotalFrames(),
             frameRate: this.getFrameRate(),
             videoClips: clips,
+            global: {
+                ...(this.timeline.global || {}),
+                taskType: this.globalTask?.value || this.taskTypeWidget?.value || "",
+                prompt: this.timeline.global?.prompt || "",
+                referenceVideo: this.timeline.global?.referenceVideo || {},
+                continuousReference: !!this.timeline.global?.continuousReference,
+            },
+            segments: (this.timeline.segments || []).map((s) => ({
+                ...s,
+                referenceVideo: s.referenceVideo || {},
+            })),
             video: {
                 ...video,
                 frameMap,
@@ -982,8 +1017,19 @@ class BerniniDirectorEditor {
                         <textarea class="bd-prompt bd-prompt-negative" data-r="global-negative" placeholder="反向提示词 — 所有片段共用"></textarea>
                     </div>
                     <div class="bd-refs-col" data-r="global-refs-col">
-                        <span class="bd-label">参考图</span>
-                        <div class="bd-refs" data-r="global-refs"></div>
+                        <div data-r="global-refs-images-wrap">
+                            <span class="bd-label" data-r="global-refs-label">参考图 (image0–4)</span>
+                            <div class="bd-refs" data-r="global-refs"></div>
+                        </div>
+                        <div class="bd-ref-video-col hidden" data-r="global-ref-video-col">
+                            <span class="bd-label">参考视频（植入内容）</span>
+                            <div class="bd-gen-src" data-r="global-ref-video" title="上传要植入的参考视频">点击上传参考视频</div>
+                            <span class="bd-meta bd-ref-video-name" data-r="global-ref-video-name"></span>
+                            <label class="bd-continuous-ref hidden" data-r="continuous-ref-wrap" title="勾选后，各片段的参考视频从与源片段时间轴相同的帧位置开始（如第2段从第30帧起，参考视频也从第30帧起）；未勾选时每段均从参考视频第1帧开始">
+                                <input type="checkbox" data-r="continuous-ref-cb">
+                                <span>连续参考</span>
+                            </label>
+                        </div>
                         <div class="bd-gen-src hidden" data-r="gen-global-img" title="上传源图片">点击上传源图片</div>
                     </div>
                 </div>
@@ -1003,8 +1049,15 @@ class BerniniDirectorEditor {
                         <textarea class="bd-prompt bd-prompt-negative" data-r="seg-negative" placeholder="反向提示词 — 所有片段共用"></textarea>
                     </div>
                     <div class="bd-refs-col" data-r="seg-refs-col">
-                        <span class="bd-label">片段参考图</span>
-                        <div class="bd-refs" data-r="seg-refs"></div>
+                        <div data-r="seg-refs-images-wrap">
+                            <span class="bd-label" data-r="seg-refs-label">片段参考图 (image0–4)</span>
+                            <div class="bd-refs" data-r="seg-refs"></div>
+                        </div>
+                        <div class="bd-ref-video-col hidden" data-r="seg-ref-video-col">
+                            <span class="bd-label">片段参考视频（植入内容）</span>
+                            <div class="bd-gen-src" data-r="seg-ref-video" title="上传要植入的参考视频">点击上传参考视频</div>
+                            <span class="bd-meta bd-ref-video-name" data-r="seg-ref-video-name"></span>
+                        </div>
                         <div class="bd-gen-src hidden" data-r="gen-seg-img" title="上传片段源图片">点击上传源图片</div>
                     </div>
                 </div>
@@ -1064,6 +1117,8 @@ class BerniniDirectorEditor {
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
         this.globalRefsBox = this.root.querySelector('[data-r="global-refs"]');
+        this.globalRefsImagesWrap = this.root.querySelector('[data-r="global-refs-images-wrap"]');
+        this.segRefsImagesWrap = this.root.querySelector('[data-r="seg-refs-images-wrap"]');
         this.segLabel = this.root.querySelector('[data-r="seg-label"]');
         this.segInfo = this.root.querySelector('[data-r="seg-info"]');
         this.segPrompt = this.root.querySelector('[data-r="seg-prompt"]');
@@ -1071,6 +1126,14 @@ class BerniniDirectorEditor {
         this.segRefsBox = this.root.querySelector('[data-r="seg-refs"]');
         this.globalRefsCol = this.root.querySelector('[data-r="global-refs-col"]');
         this.segRefsCol = this.root.querySelector('[data-r="seg-refs-col"]');
+        this.globalRefVideoCol = this.root.querySelector('[data-r="global-ref-video-col"]');
+        this.globalRefVideo = this.root.querySelector('[data-r="global-ref-video"]');
+        this.globalRefVideoNameEl = this.root.querySelector('[data-r="global-ref-video-name"]');
+        this.segRefVideoCol = this.root.querySelector('[data-r="seg-ref-video-col"]');
+        this.segRefVideo = this.root.querySelector('[data-r="seg-ref-video"]');
+        this.segRefVideoNameEl = this.root.querySelector('[data-r="seg-ref-video-name"]');
+        this.continuousRefWrap = this.root.querySelector('[data-r="continuous-ref-wrap"]');
+        this.continuousRefCb = this.root.querySelector('[data-r="continuous-ref-cb"]');
         this.genGlobalImg = this.root.querySelector('[data-r="gen-global-img"]');
         this.genSegImg = this.root.querySelector('[data-r="gen-seg-img"]');
         this.genGlobalFcRow = this.root.querySelector('[data-r="gen-global-fc-row"]');
@@ -1152,6 +1215,13 @@ class BerniniDirectorEditor {
         }
         this.globalTask.onchange = () => this.onGlobalField("taskType", this.globalTask.value);
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
+        if (this.continuousRefCb) {
+            this.continuousRefCb.onchange = () => {
+                this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
+                this.timeline.global.continuousReference = !!this.continuousRefCb.checked;
+                this.scheduleTimelineSync();
+            };
+        }
         this.segPrompt.oninput = () => this.onSegField("prompt", this.segPrompt.value);
         this.globalNegative.oninput = () => this.onNegativePrompt(this.globalNegative.value);
         this.segNegative.oninput = () => this.onNegativePrompt(this.segNegative.value);
@@ -1296,8 +1366,46 @@ class BerniniDirectorEditor {
         return inputViewUrl(clip.videoFile, clip.type || "input");
     }
 
+    getRefVideoTarget() {
+        if (this.isGlobalMode()) {
+            this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
+            if (!this.timeline.global.referenceVideo) this.timeline.global.referenceVideo = {};
+            return this.timeline.global;
+        }
+        const seg = this.timeline.segments[this.selectedIndex];
+        if (seg) {
+            if (!seg.referenceVideo) seg.referenceVideo = {};
+            return seg;
+        }
+        this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
+        return this.timeline.global;
+    }
+
+    getReferenceVideoViewUrl(ref) {
+        const block = ref || {};
+        const file = block.videoFile || block.fileName;
+        if (!file) return "";
+        return inputViewUrl(file, block.type || "input");
+    }
+
+    _stopRefVideoPreviews(onlyEls = null) {
+        const targets = onlyEls || [this.globalRefVideo, this.segRefVideo];
+        for (const el of targets) {
+            const v = el?.querySelector("video");
+            if (v) {
+                v.pause();
+                v.removeAttribute("src");
+                v.load();
+            }
+        }
+    }
+
     getTaskKey() {
-        return resolveTaskKey(this.globalTask?.value || this.taskTypeWidget?.value);
+        return resolveTaskKey(
+            this.globalTask?.value
+            || this.timeline.global?.taskType
+            || this.taskTypeWidget?.value,
+        );
     }
 
     getRunnableSegmentCount() {
@@ -1510,22 +1618,38 @@ class BerniniDirectorEditor {
     updateReferenceImageVisibility({ hideTimeline = false, seg = null } = {}) {
         const globalKey = this.getTaskKey();
         const showGlobalRefs = !hideTimeline && taskUsesReferenceImages(globalKey);
-        this.globalRefsCol?.classList.toggle("hidden", !showGlobalRefs);
-        this.globalRefsBox?.classList.toggle("hidden", !showGlobalRefs);
-        this.globalRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showGlobalRefs);
+        const showGlobalRefVideo = !hideTimeline && taskUsesReferenceVideo(globalKey);
+
+        this.globalRefsCol?.classList.toggle("hidden", !showGlobalRefs && !showGlobalRefVideo);
+        this.globalRefsImagesWrap?.classList.toggle("hidden", !showGlobalRefs);
+        this.globalRefVideoCol?.classList.toggle("hidden", !showGlobalRefVideo);
         if (this.globalPanelTitle) {
-            this.globalPanelTitle.textContent = showGlobalRefs
-                ? "全局提示词 & 参考图 (image0–4)"
-                : "全局提示词";
+            if (showGlobalRefVideo) {
+                this.globalPanelTitle.textContent = "全局提示词 & 参考视频";
+            } else if (showGlobalRefs) {
+                this.globalPanelTitle.textContent = "全局提示词 & 参考图 (image0–4)";
+            } else {
+                this.globalPanelTitle.textContent = "全局提示词";
+            }
         }
 
         const segKey = resolveTaskKey(
             seg?.taskType || this.timeline.global?.taskType || this.globalTask?.value || globalKey,
         );
         const showSegRefs = !hideTimeline && taskUsesReferenceImages(segKey);
-        this.segRefsCol?.classList.toggle("hidden", !showSegRefs);
-        this.segRefsBox?.classList.toggle("hidden", !showSegRefs);
-        this.segRefsCol?.querySelector(".bd-label")?.classList.toggle("hidden", !showSegRefs);
+        const showSegRefVideo = !hideTimeline && taskUsesReferenceVideo(segKey);
+        this.segRefsCol?.classList.toggle("hidden", !showSegRefs && !showSegRefVideo);
+        this.segRefsImagesWrap?.classList.toggle("hidden", !showSegRefs);
+        this.segRefVideoCol?.classList.toggle("hidden", !showSegRefVideo);
+        const showContinuousRef = !hideTimeline
+            && this.isGlobalMode()
+            && showGlobalRefVideo
+            && globalKey === "ads2v";
+        this.continuousRefWrap?.classList.toggle("hidden", !showContinuousRef);
+        if (this.continuousRefCb) {
+            this.continuousRefCb.checked = !!this.timeline.global?.continuousReference;
+        }
+        if (showGlobalRefVideo || showSegRefVideo) this.renderRefVideoSlot();
     }
 
     applyTaskLayout(prevMode) {
@@ -1664,6 +1788,134 @@ class BerniniDirectorEditor {
             el.innerHTML = `<img src="${refViewUrl(imageFile)}" alt="">`;
         } else {
             el.textContent = label;
+        }
+    }
+
+    _paintRefVideoSlot(el, nameEl, refBlock) {
+        if (!el) return;
+        const ref = refBlock || {};
+        const has = !!(ref.videoFile || ref.fileName);
+        el.classList.toggle("has-img", false);
+        el.classList.toggle("has-video", has);
+        if (nameEl) {
+            if (has) {
+                const dur = ref.duration > 0 ? ` · ${ref.duration.toFixed(2)}s` : "";
+                const fps = ref.nativeFps > 0 ? ` · ${Math.round(ref.nativeFps)}fps` : "";
+                const dim = ref.width && ref.height ? ` · ${ref.width}×${ref.height}` : "";
+                nameEl.textContent = `${ref.fileName || ref.videoFile || ""}${dim}${dur}${fps}`;
+            } else {
+                nameEl.textContent = "";
+            }
+        }
+        if (!has) {
+            el.innerHTML = "";
+            el.textContent = "点击上传参考视频";
+            el.onclick = () => this.pickReferenceVideoFile();
+            return;
+        }
+        const viewUrl = this.getReferenceVideoViewUrl(ref);
+        el.innerHTML = `
+            <video class="bd-ref-video-preview" muted playsinline preload="metadata" controls></video>
+            <button type="button" class="bd-ref-replace" title="更换参考视频">更换</button>
+            <span class="x" title="移除参考视频">×</span>`;
+        el.onclick = null;
+        const video = el.querySelector("video");
+        if (video && viewUrl) {
+            video.src = viewUrl;
+            video.addEventListener("click", (e) => e.stopPropagation());
+            video.addEventListener("dblclick", (e) => {
+                e.stopPropagation();
+                if (video.paused) video.play().catch(() => {});
+                else video.pause();
+            });
+        }
+        const replaceBtn = el.querySelector(".bd-ref-replace");
+        if (replaceBtn) {
+            replaceBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.pickReferenceVideoFile();
+            };
+        }
+        const removeBtn = el.querySelector(".x");
+        if (removeBtn) {
+            removeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.clearReferenceVideo();
+            };
+        }
+    }
+
+    renderRefVideoSlot() {
+        if (this.isGlobalMode()) {
+            this._stopRefVideoPreviews([this.segRefVideo]);
+            this._paintRefVideoSlot(
+                this.globalRefVideo,
+                this.globalRefVideoNameEl,
+                this.timeline.global?.referenceVideo || {},
+            );
+        } else {
+            this._stopRefVideoPreviews([this.globalRefVideo]);
+            const seg = this.timeline.segments[this.selectedIndex];
+            this._paintRefVideoSlot(this.segRefVideo, this.segRefVideoNameEl, seg?.referenceVideo || {});
+        }
+    }
+
+    _activeRefVideoTaskKey() {
+        if (this.isGlobalMode()) return this.getTaskKey();
+        const seg = this.timeline.segments[this.selectedIndex];
+        return resolveTaskKey(seg?.taskType || this.timeline.global?.taskType || this.getTaskKey());
+    }
+
+    pickReferenceVideoFile() {
+        if (!taskUsesReferenceVideo(this._activeRefVideoTaskKey())) return;
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "video/*";
+        input.onchange = () => {
+            if (input.files?.[0]) this.loadReferenceVideoFile(input.files[0]);
+        };
+        input.click();
+    }
+
+    clearReferenceVideo() {
+        const target = this.getRefVideoTarget();
+        this._stopRefVideoPreviews();
+        target.referenceVideo = {};
+        this.renderRefVideoSlot();
+        this.commit();
+    }
+
+    async loadReferenceVideoFile(file) {
+        const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
+        const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
+        const status = `上传中: ${file.name}…`;
+        if (slotEl) {
+            slotEl.classList.remove("has-img", "has-video");
+            slotEl.textContent = status;
+        }
+        if (nameEl) nameEl.textContent = status;
+        try {
+            const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
+                const pct = Math.round(frac * 100);
+                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? "分块" : "上传";
+                if (nameEl) nameEl.textContent = `${mode}参考视频: ${file.name} (${cur}/${total}, ${pct}%)…`;
+            });
+            const relPath = videoRelativePath(uploaded);
+            const prep = await this._prepareVideoFrames({
+                fileName: file.name,
+                relPath,
+                subfolder: uploaded.subfolder || "",
+                type: uploaded.type || "input",
+                statusPrefix: "解析参考视频",
+                syncNativeFps: false,
+            });
+            this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
+            this.renderRefVideoSlot();
+            this.commit(false, { syncTimeline: true });
+        } catch (err) {
+            console.error("[BerniniDirector] reference video load failed:", err);
+            if (nameEl) nameEl.textContent = `参考视频加载失败: ${formatUploadError(err)}`;
+            this.renderRefVideoSlot();
         }
     }
 
@@ -2189,7 +2441,12 @@ class BerniniDirectorEditor {
         const global = this.isGlobalMode();
         this.globalPanel.style.display = global ? "flex" : "none";
         this.segmentPanel.style.display = global ? "none" : "flex";
+        this.updateReferenceImageVisibility({
+            hideTimeline: this.isImageBatch() || this.isGenMode(),
+            seg: global ? null : this.timeline.segments[this.selectedIndex],
+        });
         if (!global) this.updateSelectionUI();
+        else if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
     }
 
     getRefTarget() {
@@ -2415,9 +2672,12 @@ class BerniniDirectorEditor {
     }
 
     syncFromWidgets() {
-        this.timeline.global = this.timeline.global || { refs: [] };
+        this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {}, continuousReference: false };
         this.timeline.global.taskType = this.globalTask?.value || this.taskTypeWidget?.value || "";
         this.timeline.global.prompt = this.globalPrompt?.value ?? this.globalPromptWidget?.value ?? "";
+        if (this.continuousRefCb) {
+            this.timeline.global.continuousReference = !!this.continuousRefCb.checked;
+        }
         this.timeline.totalFrames = this.getTotalFrames();
         this.timeline.frameRate = this.getFrameRate();
         this.timeline.output = this.timeline.output || { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" };
@@ -2461,7 +2721,7 @@ class BerniniDirectorEditor {
             this.timeline.totalFrames = 0;
             return;
         }
-        if (!segs.length) segs = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }];
+        if (!segs.length) segs = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }];
         const fixed = [];
         let cursor = 0;
         for (const seg of segs) {
@@ -2638,7 +2898,7 @@ class BerniniDirectorEditor {
     _setSingleSegment(totalFrames) {
         const total = Math.max(0, totalFrames);
         this.timeline.segments = total > 0
-            ? [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }]
+            ? [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }]
             : [];
         this.selectedIndex = 0;
         this.currentFrame = 0;
@@ -2671,6 +2931,9 @@ class BerniniDirectorEditor {
         const n = this.getTotalFrames();
         this._prefetchSegmentThumbs(0, Math.min(n, THUMB_PREFETCH_BATCH * 4));
         this.updateVideoNameLabel();
+        if (taskUsesReferenceVideo(this.getTaskKey()) && this.getReferenceVideoViewUrl(this.timeline.global?.referenceVideo)) {
+            this.renderRefVideoSlot();
+        }
     }
 
     _prefetchSegmentThumbs(from, to) {
@@ -3019,6 +3282,7 @@ class BerniniDirectorEditor {
             prompt: "",
             taskType: "",
             refs: [],
+            referenceVideo: {},
             videoClipId: clip.id,
         });
 
@@ -3266,7 +3530,7 @@ class BerniniDirectorEditor {
             const end = seg.start + seg.length;
             if (frame > seg.start && frame < end) {
                 newSegs.push({ ...seg, length: frame - seg.start });
-                newSegs.push({ id: uid(), start: frame, length: end - frame, prompt: "", taskType: "", refs: [] });
+                newSegs.push({ id: uid(), start: frame, length: end - frame, prompt: "", taskType: "", refs: [], referenceVideo: {} });
             } else newSegs.push({ ...seg });
         }
         this.timeline.segments = newSegs;
@@ -3377,7 +3641,7 @@ class BerniniDirectorEditor {
         }
         const segs = [...this.timeline.segments].sort((a, b) => a.start - b.start);
         if (!segs.length) {
-            this.timeline.segments = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }];
+            this.timeline.segments = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }];
             return;
         }
         let cursor = 0;
@@ -3394,7 +3658,7 @@ class BerniniDirectorEditor {
             cursor += length;
         }
         if (!fixed.length) {
-            this.timeline.segments = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [] }];
+            this.timeline.segments = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }];
         } else if (cursor < total) {
             fixed[fixed.length - 1].length += total - cursor;
         }
@@ -3717,8 +3981,14 @@ class BerniniDirectorEditor {
         const seg = this.isGlobalMode() ? null : this.timeline.segments[this.selectedIndex];
         this.updateReferenceImageVisibility({ hideTimeline, seg: seg || null });
 
-        if (taskUsesReferenceImages(this.getTaskKey())) {
+        if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
             this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
+        }
+        const refVideoKey = this.isGlobalMode()
+            ? this.getTaskKey()
+            : resolveTaskKey(seg?.taskType || this.timeline.global?.taskType || this.getTaskKey());
+        if (taskUsesReferenceVideo(refVideoKey)) {
+            this.renderRefVideoSlot();
         }
         if (this.isGenImage() && this.isGlobalMode()) {
             this.renderGenSrcSlot(
@@ -3736,6 +4006,7 @@ class BerniniDirectorEditor {
 
         if (!seg) return;
         const fps = this.getFrameRate();
+        const segKey = resolveTaskKey(seg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         this.segLabel.textContent = `片段 ${this.selectedIndex + 1}`;
         let info;
         if (this.isGenMode()) {
@@ -3750,10 +4021,14 @@ class BerniniDirectorEditor {
                 const clipName = clip?.fileName || clip?.videoFile || `视频 ${this.getSegmentClipIndex(seg) + 1}`;
                 info += ` · ${clipName}`;
             }
+            if (taskUsesReferenceVideo(segKey)) {
+                info += seg.referenceVideo?.videoFile || seg.referenceVideo?.fileName
+                    ? " · 已上传参考视频"
+                    : " · 未上传参考视频";
+            }
         }
         this.segInfo.textContent = info;
         this.segPrompt.value = seg.prompt || "";
-        const segKey = resolveTaskKey(seg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         if (taskUsesReferenceImages(segKey)) {
             this.renderRefSlots(seg.refs, this.segRefsBox, false);
         }
@@ -3845,12 +4120,20 @@ class BerniniDirectorEditor {
 
     onGlobalField(field, value) {
         this.timeline.global = this.timeline.global || { refs: [] };
-        this.timeline.global[field] = value;
         if (field === "taskType") {
+            const prevTaskKey = resolveTaskKey(
+                this.timeline.global?.taskType || this.globalTask?.value || this.taskTypeWidget?.value || "",
+            );
+            this.timeline.global[field] = value;
             const prevMode = this._directorMode || "video";
             if (this.globalTask && this.globalTask.value !== value) this.globalTask.value = value;
             if (this.taskTypeWidget) this.taskTypeWidget.value = value;
+            if (prevTaskKey === "ads2v" && resolveTaskKey(value) !== "ads2v") {
+                this._stopRefVideoPreviews();
+            }
             this.applyTaskLayout(prevMode);
+        } else {
+            this.timeline.global[field] = value;
         }
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();

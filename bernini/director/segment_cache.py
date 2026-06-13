@@ -26,6 +26,7 @@ def _cache_root(node_id: str) -> Path:
 def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
     """Stable identity for a segment — cache invalidates when edit params change."""
     ref_files = sorted(f"img{ref.index}" for ref in seg.refs)
+    ref_video_file = (seg.reference_video_meta.get("videoFile") or seg.reference_video_meta.get("fileName") or "").strip()
     return {
         "index": seg.index,
         "start": seg.start_frame,
@@ -38,6 +39,8 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "output_mode": plan.output_mode,
         "ref_max": plan.ref_max_size,
         "refs": ref_files,
+        "ref_video": ref_video_file,
+        "ref_video_start": seg.reference_video_start_frame,
     }
 
 

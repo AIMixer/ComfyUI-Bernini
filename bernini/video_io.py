@@ -570,6 +570,43 @@ def _decode_timeline_entries(
     return torch.stack(rows, dim=0)
 
 
+def load_reference_video_clip(
+    ref_block: dict,
+    timeline: dict,
+    num_frames: int,
+    *,
+    start_frame: int = 0,
+) -> torch.Tensor | None:
+    """Load an ads2v reference video clip, resampled to ``num_frames`` at timeline FPS.
+
+    ``start_frame`` is the logical timeline offset (0 = from beginning). Used when
+    global *continuous reference* is enabled so segment N uses ref frame N onward.
+    """
+    if not (ref_block.get("videoFile") or ref_block.get("fileName") or "").strip():
+        return None
+
+    path = resolve_video_path(ref_block)
+    frame_rate = float(timeline.get("frameRate") or 24)
+    output_block = timeline.get("output") or {}
+    long_edge = int(
+        output_block.get("longEdge")
+        or output_block.get("long_edge")
+        or timeline.get("refMaxSize")
+        or 848
+    )
+    count = max(1, int(num_frames))
+    offset = max(0, int(start_frame))
+    frame_indices = list(range(offset, offset + count))
+    return load_video_resampled(
+        path,
+        frame_rate,
+        frame_indices,
+        storage_width=ref_block.get("storageWidth"),
+        storage_height=ref_block.get("storageHeight"),
+        long_edge=long_edge,
+    )
+
+
 def load_timeline_segment(timeline: dict, start: int, end: int) -> torch.Tensor:
     """Decode only logical frames in [start, end) — supports arbitrarily long timelines."""
     total = logical_frame_count(timeline)
