@@ -33,20 +33,6 @@ def resolve_attention_mode(requested: str) -> str:
         return "sageattn"
 
 
-def tune_block_swap_args(block_swap_args: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Enable non-blocking transfer + one-block prefetch when swap is active."""
-    if not block_swap_args:
-        return block_swap_args
-    tuned = dict(block_swap_args)
-    if int(tuned.get("blocks_to_swap", 0)) <= 0:
-        return tuned
-    if int(tuned.get("prefetch_blocks", 0)) == 0:
-        tuned["prefetch_blocks"] = 1
-    if not tuned.get("use_non_blocking", False):
-        tuned["use_non_blocking"] = True
-    return tuned
-
-
 def prefer_merged_loras(lora: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     """Prefer merged static LoRAs (distill adapters) unless low-mem load is requested."""
     if not lora:
@@ -88,19 +74,3 @@ def auto_batched_cfg(
     if len(prompt) != 1 or len(negative) != 1:
         return False
     return any(not math.isclose(float(c), 1.0) for c in cfg)
-
-
-def apply_block_swap_tuning(transformer_options: dict[str, Any] | None) -> None:
-    if not transformer_options:
-        return
-    bsa = transformer_options.get("block_swap_args")
-    if bsa is None:
-        return
-    tuned = tune_block_swap_args(bsa)
-    if tuned != bsa:
-        transformer_options["block_swap_args"] = tuned
-        log.info(
-            "Bernini perf: block swap tuned (prefetch_blocks=%s, use_non_blocking=%s)",
-            tuned.get("prefetch_blocks"),
-            tuned.get("use_non_blocking"),
-        )

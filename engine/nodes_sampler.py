@@ -129,11 +129,6 @@ class WanVideoSampler:
         transformer_options = copy.deepcopy(patcher.model_options.get("transformer_options", None))
         merge_loras = transformer_options["merge_loras"]
 
-        if image_embeds.get("bernini_pipeline"):
-            from .bernini_perf import apply_block_swap_tuning
-
-            apply_block_swap_tuning(transformer_options)
-
         block_swap_args = transformer_options.get("block_swap_args", None)
         if block_swap_args is not None:
             transformer.use_non_blocking = block_swap_args.get("use_non_blocking", False)
