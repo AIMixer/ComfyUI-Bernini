@@ -86,41 +86,107 @@ def sample_dual_stage(
     split_step: int,
     sampler_name: str,
     scheduler: str,
+    high_noise_only: bool = False,
+    return_high: bool = False,
 ):
     from nodes import KSamplerAdvanced
 
     sampler = KSamplerAdvanced()
     split_step = max(1, min(int(split_step), int(steps) - 1))
 
-    latent_high, = sampler.sample(
+    def sample_advanced(
+        model,
+        add_noise,
+        seed,
+        cfg,
+        latent_image,
+        start_at_step,
+        end_at_step,
+        return_with_leftover_noise,
+        *,
+        capture_denoised=False,
+    ):
+        captured = {"samples": None}
+        latent_preview = None
+        original_prepare_callback = None
+
+        if capture_denoised:
+            try:
+                import latent_preview as latent_preview_module
+
+                latent_preview = latent_preview_module
+                original_prepare_callback = latent_preview.prepare_callback
+
+                def prepare_callback_with_capture(*args, **kwargs):
+                    callback = original_prepare_callback(*args, **kwargs)
+
+                    def wrapped_callback(step, x0, x, total_steps):
+                        if torch.is_tensor(x0):
+                            captured["samples"] = x0.detach().cpu()
+                        if callback is not None:
+                            return callback(step, x0, x, total_steps)
+                        return None
+
+                    return wrapped_callback
+
+                latent_preview.prepare_callback = prepare_callback_with_capture
+            except Exception as exc:
+                log.debug("Could not capture core KSampler denoised samples: %s", exc)
+                latent_preview = None
+
+        try:
+            sampled, = sampler.sample(
+                model,
+                add_noise,
+                int(seed),
+                int(steps),
+                float(cfg),
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                int(start_at_step),
+                int(end_at_step),
+                return_with_leftover_noise,
+            )
+        finally:
+            if latent_preview is not None and original_prepare_callback is not None:
+                latent_preview.prepare_callback = original_prepare_callback
+
+        denoised = None
+        if captured["samples"] is not None:
+            denoised = dict(sampled)
+            denoised["samples"] = captured["samples"]
+        return sampled, denoised
+
+    latent_high, denoised_high = sample_advanced(
         model_high,
         "enable",
-        int(high_seed),
-        int(steps),
-        float(high_cfg),
-        sampler_name,
-        scheduler,
-        positive,
-        negative,
+        high_seed,
+        high_cfg,
         latent,
         0,
         split_step,
         "enable",
+        capture_denoised=high_noise_only and return_high,
     )
 
-    latent_low, = sampler.sample(
+    if high_noise_only:
+        if return_high:
+            return latent_high, denoised_high or latent_high
+        return latent_high
+
+    latent_low, _ = sample_advanced(
         model_low,
         "disable",
-        int(low_seed),
-        int(steps),
-        float(low_cfg),
-        sampler_name,
-        scheduler,
-        positive,
-        negative,
+        low_seed,
+        low_cfg,
         latent_high,
         split_step,
-        int(steps),
+        steps,
         "disable",
     )
+    if return_high:
+        return latent_low, latent_high
     return latent_low

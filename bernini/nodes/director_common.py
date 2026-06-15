@@ -116,6 +116,13 @@ def director_perf_inputs() -> dict:
 
 
 def validate_decode_tiles(tile_x, tile_y, tile_stride_x, tile_stride_y, **_kwargs):
+    try:
+        tile_x = int(tile_x)
+        tile_y = int(tile_y)
+        tile_stride_x = int(tile_stride_x)
+        tile_stride_y = int(tile_stride_y)
+    except (TypeError, ValueError):
+        return "Decode tile settings must be integers. Reload the workflow if widgets look shifted."
     if tile_x <= tile_stride_x:
         return "Decode tile_x must be larger than tile_stride_x."
     if tile_y <= tile_stride_y:
@@ -252,6 +259,8 @@ def finalize_director_outputs(
     plan,
     combined,
     segment_outputs,
+    high_noise_combined,
+    high_noise_segment_outputs,
     report,
     *,
     export_source_images: bool = False,
@@ -262,6 +271,7 @@ def finalize_director_outputs(
 
     if export_segments or (is_batch and not video_batch):
         images_out = segment_outputs
+        images_high_noise_out = high_noise_segment_outputs
         frame_count = sum(int(s.shape[0]) for s in segment_outputs)
         if export_segments and len(segment_outputs) > 1:
             report = (
@@ -278,6 +288,11 @@ def finalize_director_outputs(
     else:
         combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
         images_out = [combined]
+        if high_noise_combined is None:
+            images_high_noise_out = []
+        else:
+            high_noise_combined = pad_or_trim_frames(high_noise_combined, plan.total_frames).cpu().float()
+            images_high_noise_out = [high_noise_combined]
         frame_count = int(combined.shape[0])
         if video_batch and is_batch and len(segment_outputs) > 1:
             report = (
@@ -326,4 +341,4 @@ def finalize_director_outputs(
         source_images_out = []
 
     fps_out = float(plan.frame_rate or 24.0)
-    return images_out, audio_out, frame_count, report, source_images_out, fps_out
+    return images_out, audio_out, frame_count, report, source_images_out, fps_out, images_high_noise_out

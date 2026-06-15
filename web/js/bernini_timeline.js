@@ -47,6 +47,7 @@ const HIDDEN_WIDGETS = [
 ];
 
 const DIRECTOR_WIDGET_LABELS = {
+    high_noise_only: "仅高噪采样",
     clear_vram_between_segments: "段间清理显存",
     export_source_images: "输出原片对比 source_images",
 };
@@ -4391,9 +4392,18 @@ function migrateDirectorOutputLinks(node) {
     }
 }
 
+function ensureDirectorOutputs(node) {
+    if (!isBerniniDirectorNode(node)) return;
+    const outputs = node.outputs || [];
+    if (!outputs.some((o) => o?.name === "images_high_noise")) {
+        node.addOutput?.("images_high_noise", "IMAGE");
+    }
+}
+
 function normalizeDirectorOutputs(node) {
     stripDeprecatedDirectorOutputs(node);
     migrateDirectorOutputLinks(node);
+    ensureDirectorOutputs(node);
 }
 
 app.registerExtension({

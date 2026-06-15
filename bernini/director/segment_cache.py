@@ -49,31 +49,37 @@ def save_segment_cache(
     seg: SegmentPlan,
     plan: DirectorPlan,
     tensor: torch.Tensor,
+    *,
+    variant: str = "final",
 ) -> None:
     if not node_id:
         return
     fp = segment_cache_fingerprint(seg, plan)
     root = _cache_root(node_id)
     idx = seg.index
-    torch.save(tensor.cpu().float(), root / f"seg_{idx:04d}.pt")
-    (root / f"seg_{idx:04d}.meta.json").write_text(
+    suffix = "" if variant == "final" else f".{variant}"
+    torch.save(tensor.cpu().float(), root / f"seg_{idx:04d}{suffix}.pt")
+    (root / f"seg_{idx:04d}{suffix}.meta.json").write_text(
         json.dumps(fp, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    log.debug("Cached segment %d for node %s (%d frames)", idx + 1, node_id, tensor.shape[0])
+    log.debug("Cached segment %d for node %s (%s, %d frames)", idx + 1, node_id, variant, tensor.shape[0])
 
 
 def load_segment_cache(
     node_id: str | None,
     seg: SegmentPlan,
     plan: DirectorPlan,
+    *,
+    variant: str = "final",
 ) -> torch.Tensor | None:
     if not node_id:
         return None
     root = _cache_root(node_id)
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    tensor_path = root / f"seg_{idx:04d}.pt"
+    suffix = "" if variant == "final" else f".{variant}"
+    meta_path = root / f"seg_{idx:04d}{suffix}.meta.json"
+    tensor_path = root / f"seg_{idx:04d}{suffix}.pt"
     if not meta_path.is_file() or not tensor_path.is_file():
         return None
     try:

@@ -156,15 +156,22 @@ class BerniniDirector:
                         "tooltip": "TeaCache 加速双阶段采样（开 = 更快，画质可能略降）。默认关 = 全精度。若已连接 Extra Args 的 Cache 节点，以 Cache 为准。",
                     },
                 ),
+                "high_noise_only": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Only run the high-noise sampler; skip low-noise sampling and decode high-noise samples as final images.",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     VALIDATE_INPUTS = validate_decode_tiles
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT")
-    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT", "IMAGE")
+    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps", "images_high_noise")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
@@ -216,9 +223,11 @@ class BerniniDirector:
         clear_vram_between_segments=True,
         export_source_images=False,
         enable_teacache=False,
+        high_noise_only=False,
         **kwargs,
     ):
         del kwargs  # bd_grp_* section headers — UI only
+        high_noise_only = high_noise_only is True or str(high_noise_only).lower() in ("1", "true", "yes", "on")
         t5 = resolve_t5_config(t5_config)
 
         plan = prepare_director_plan(
@@ -233,7 +242,7 @@ class BerniniDirector:
             unique_id=unique_id,
         )
 
-        combined, segment_outputs, report = execute_director_plan(
+        combined, segment_outputs, high_noise_combined, high_noise_segment_outputs, report = execute_director_plan(
             plan,
             node_id=unique_id,
             vae=vae,
@@ -251,6 +260,7 @@ class BerniniDirector:
             high_noise_seed=high_noise_seed,
             high_noise_force_offload=high_noise_force_offload,
             high_noise_add_noise_to_samples=high_noise_add_noise_to_samples,
+            high_noise_only=high_noise_only,
             low_noise_cfg=low_noise_cfg,
             low_noise_seed=low_noise_seed,
             low_noise_force_offload=low_noise_force_offload,
@@ -273,6 +283,8 @@ class BerniniDirector:
             plan,
             combined,
             segment_outputs,
+            high_noise_combined,
+            high_noise_segment_outputs,
             report,
             export_source_images=export_source_images,
         )

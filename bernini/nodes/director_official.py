@@ -162,6 +162,13 @@ class BerniniDirectorOfficial:
                     },
                 ),
                 **director_perf_inputs(),
+                "high_noise_only": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Only run the high-noise sampler; skip low-noise sampling and decode high-noise samples as final images.",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -185,9 +192,9 @@ class BerniniDirectorOfficial:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT")
-    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "STRING", "IMAGE", "FLOAT", "IMAGE")
+    RETURN_NAMES = ("images", "audio", "frame_count", "report", "source_images", "fps", "images_high_noise")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
@@ -226,9 +233,11 @@ class BerniniDirectorOfficial:
         apg_norm_threshold=0.0,
         clear_vram_between_segments=True,
         export_source_images=False,
+        high_noise_only=False,
         **kwargs,
     ):
         del kwargs  # bd_grp_* headers
+        high_noise_only = high_noise_only is True or str(high_noise_only).lower() in ("1", "true", "yes", "on")
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -242,7 +251,7 @@ class BerniniDirectorOfficial:
             unique_id=unique_id,
         )
 
-        combined, segment_outputs, report = execute_director_plan_core(
+        combined, segment_outputs, high_noise_combined, high_noise_segment_outputs, report = execute_director_plan_core(
             plan,
             node_id=unique_id,
             vae=vae,
@@ -252,6 +261,7 @@ class BerniniDirectorOfficial:
             negative_prompt=negative_prompt,
             high_noise_cfg=high_noise_cfg,
             high_noise_seed=high_noise_seed,
+            high_noise_only=high_noise_only,
             low_noise_cfg=low_noise_cfg,
             low_noise_seed=low_noise_seed,
             steps=steps,
@@ -269,6 +279,8 @@ class BerniniDirectorOfficial:
             plan,
             combined,
             segment_outputs,
+            high_noise_combined,
+            high_noise_segment_outputs,
             report,
             export_source_images=export_source_images,
         )

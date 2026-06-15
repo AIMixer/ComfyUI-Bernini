@@ -10,9 +10,12 @@ from ..image_prep import fit_canvas, fit_video_long_edge, cat_frames_variable_si
 from ..nodes.conditioning import _run_conditioning
 from .core_sampling import apply_apg, apply_model_sampling_shift, sample_dual_stage
 from .core_text_encode import encode_core_conditioning
+from .frame_align import pad_or_trim_frames
 from .executor import (
+    _align_decoded_frames,
     _frames_label,
     _is_gen_timeline_plan,
+    _latent_has_samples,
     _needs_source_video,
     _resolve_segment_raw_clip,
     _segment_passthrough_chunk,
@@ -45,6 +48,7 @@ def execute_director_plan_core(
     negative_prompt: str,
     high_noise_cfg: float = 1.0,
     high_noise_seed: int = 0,
+    high_noise_only: bool = False,
     low_noise_cfg: float = 1.0,
     low_noise_seed: int = 0,
     steps: int = 6,
@@ -56,7 +60,7 @@ def execute_director_plan_core(
     apg_momentum: float = 0.0,
     apg_norm_threshold: float = 0.0,
     clear_vram_between_segments: bool = True,
-) -> tuple[torch.Tensor, list[torch.Tensor], str]:
+) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor | None, list[torch.Tensor], str]:
     """Process every segment with ComfyUI core Bernini conditioning + KSampler."""
     from nodes import VAEDecode
 
@@ -83,7 +87,11 @@ def execute_director_plan_core(
 
     output_chunks: list[torch.Tensor] = []
     segment_outputs: list[torch.Tensor] = []
+    high_noise_output_chunks: list[torch.Tensor] = []
+    high_noise_segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), "", "Execution backend: 官方流 (ComfyUI core)"]
+    if high_noise_only:
+        reports.append("Sampling: high-noise only enabled; low-noise pass skipped.")
     if clear_vram_between_segments:
         reports.append(
             "VRAM: 段间清理显存已开启（多段时在 context 编码后卸载模型；"
@@ -96,7 +104,7 @@ def execute_director_plan_core(
             f"(indices {[i + 1 for i in run_list]}; skipped {skipped or 'none'})"
         )
 
-    def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
+    def _run_one_segment(seg, *, progress_index: int) -> tuple[torch.Tensor, torch.Tensor | None]:
         meta = {
             "frames_label": _frames_label(seg),
             "task_key": seg.task_key,
@@ -222,7 +230,7 @@ def execute_director_plan_core(
             phase_max=1,
             **meta,
         )
-        samples = sample_dual_stage(
+        sample_kwargs = dict(
             model_high=model_high,
             model_low=model_low,
             positive=positive,
@@ -237,6 +245,15 @@ def execute_director_plan_core(
             sampler_name=sampler,
             scheduler=scheduler,
         )
+        samples_high = None
+        if high_noise_only:
+            samples, samples_high = sample_dual_stage(
+                **sample_kwargs,
+                high_noise_only=True,
+                return_high=True,
+            )
+        else:
+            samples = sample_dual_stage(**sample_kwargs)
         report_director_progress(
             node_id,
             segment_index=progress_index,
@@ -265,7 +282,21 @@ def execute_director_plan_core(
             phase_max=1,
             **meta,
         )
-        decoded, = decoder.decode(vae, samples)
+        high_noise_chunk = None
+        decoded_high = None
+        if high_noise_only:
+            decoded, = decoder.decode(vae, samples)
+            decoded = _align_decoded_frames(decoded, target_len)
+            high_noise_samples = samples_high if _latent_has_samples(samples_high) else samples
+            decoded_high, = decoder.decode(vae, high_noise_samples)
+            decoded_high = _align_decoded_frames(decoded_high, target_len)
+            high_noise_chunk = decoded_high.cpu().float()
+            save_segment_cache(node_id, seg, plan, high_noise_chunk, variant="high_noise")
+            chunk = decoded.cpu().float()
+        else:
+            decoded, = decoder.decode(vae, samples)
+            decoded = _align_decoded_frames(decoded, target_len)
+            chunk = decoded.cpu().float()
         report_director_progress(
             node_id,
             segment_index=progress_index,
@@ -276,13 +307,6 @@ def execute_director_plan_core(
             **meta,
         )
 
-        if decoded.shape[0] > target_len:
-            decoded = decoded[:target_len]
-        elif decoded.shape[0] < target_len and decoded.shape[0] > 0:
-            pad = decoded[-1:].repeat(target_len - decoded.shape[0], 1, 1, 1)
-            decoded = torch.cat([decoded, pad], dim=0)
-
-        chunk = decoded.cpu().float()
         save_segment_cache(node_id, seg, plan, chunk)
 
         if plan.global_task_key in {"t2i", "i2i", "r2i"} and decoded.shape[0] >= 1:
@@ -317,7 +341,7 @@ def execute_director_plan_core(
                 log.debug("Segment video preview skipped: %s", exc)
 
         if clear_vram_between_segments:
-            del positive, negative, latent, samples, decoded, clip_frames, source_arg, raw_clip
+            del positive, negative, latent, samples, samples_high, decoded, decoded_high, clip_frames, source_arg, raw_clip
             cleanup_segment_vram(enabled=True)
 
         reports.append(
@@ -331,23 +355,31 @@ def execute_director_plan_core(
             target_len,
             seg.task_key,
         )
-        return chunk
+        return chunk, high_noise_chunk
 
     for seg in all_segments:
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
-            chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
+            chunk, high_noise_chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
             segment_outputs.append(chunk)
+            if high_noise_chunk is not None:
+                high_noise_segment_outputs.append(high_noise_chunk)
             if plan.export_mode == "all":
                 output_chunks.append(chunk)
+                if high_noise_chunk is not None:
+                    high_noise_output_chunks.append(high_noise_chunk)
             continue
 
         if plan.export_mode != "all":
             continue
 
         cached = load_segment_cache(node_id, seg, plan)
+        high_cached = load_segment_cache(node_id, seg, plan, variant="high_noise") if high_noise_only else None
         if cached is not None:
+            cached = pad_or_trim_frames(cached, seg.frame_count).cpu().float()
+            if high_cached is not None:
+                high_cached = pad_or_trim_frames(high_cached, seg.frame_count).cpu().float()
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: "
                 f"loaded from cache ({cached.shape[0]} frames)"
@@ -357,6 +389,7 @@ def execute_director_plan_core(
                 cached = _segment_passthrough_chunk(plan, seg)
                 if cached is not None:
                     save_segment_cache(node_id, seg, plan, cached)
+                    high_cached = cached
                     reports.append(
                         f"Segment {seg.index + 1}/{len(all_segments)}: "
                         f"source passthrough ({cached.shape[0]} frames, no prior cache)"
@@ -369,11 +402,20 @@ def execute_director_plan_core(
                 f"Segment {seg.index + 1} is not selected and has no valid cache. "
                 "Run all segments once (全部运行), or include this segment in your run selection."
             )
+        if high_noise_only and high_cached is None:
+            high_cached = cached
         output_chunks.append(cached.float())
+        if high_cached is not None:
+            high_noise_output_chunks.append(high_cached.float())
 
     if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
 
     report_director_finish(node_id, seg_total)
     combined = cat_frames_variable_size(output_chunks) if output_chunks else cat_frames_variable_size(segment_outputs)
-    return combined, segment_outputs, "\n".join(reports)
+    high_noise_combined = None
+    if high_noise_output_chunks:
+        high_noise_combined = cat_frames_variable_size(high_noise_output_chunks)
+    elif high_noise_segment_outputs:
+        high_noise_combined = cat_frames_variable_size(high_noise_segment_outputs)
+    return combined, segment_outputs, high_noise_combined, high_noise_segment_outputs, "\n".join(reports)

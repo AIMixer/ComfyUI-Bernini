@@ -100,6 +100,20 @@ def _frames_label(seg) -> str:
     return f"帧 {seg.start_frame}–{seg.end_frame} ({seg.frame_count}f)"
 
 
+def _align_decoded_frames(decoded: torch.Tensor, target_len: int) -> torch.Tensor:
+    if decoded.shape[0] > target_len:
+        return decoded[:target_len]
+    if decoded.shape[0] < target_len and decoded.shape[0] > 0:
+        pad = decoded[-1:].repeat(target_len - decoded.shape[0], 1, 1, 1)
+        return torch.cat([decoded, pad], dim=0)
+    return decoded
+
+
+def _latent_has_samples(samples) -> bool:
+    tensor = samples.get("samples") if isinstance(samples, dict) else None
+    return isinstance(tensor, torch.Tensor) and int(tensor.numel()) > 0
+
+
 def execute_director_plan(
     plan: DirectorPlan,
     *,
@@ -119,6 +133,7 @@ def execute_director_plan(
     high_noise_seed: int = 0,
     high_noise_force_offload: bool = True,
     high_noise_add_noise_to_samples: bool = True,
+    high_noise_only: bool = False,
     low_noise_cfg: float = 1.0,
     low_noise_seed: int = 0,
     low_noise_force_offload: bool = True,
@@ -135,8 +150,8 @@ def execute_director_plan(
     tiled_vae: bool = False,
     vae_force_offload: bool = True,
     clear_vram_between_segments: bool = True,
-) -> tuple[torch.Tensor, list[torch.Tensor], str]:
-    """Process every segment; return combined frames, per-segment frames, and report."""
+) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor | None, list[torch.Tensor], str]:
+    """Process every segment; return final/high-noise frames plus report."""
     from .extra_args import merge_sampler_extra_args
 
     high_extra = merge_sampler_extra_args(high_noise_extra_args, enable_teacache=enable_teacache)
@@ -154,7 +169,11 @@ def execute_director_plan(
 
     output_chunks: list[torch.Tensor] = []
     segment_outputs: list[torch.Tensor] = []
+    high_noise_output_chunks: list[torch.Tensor] = []
+    high_noise_segment_outputs: list[torch.Tensor] = []
     reports: list[str] = [plan_summary(plan), ""]
+    if high_noise_only:
+        reports.append("Sampling: high-noise only enabled; low-noise pass skipped.")
     if clear_vram_between_segments:
         reports.append(
             "VRAM: 段间清理显存已开启（多段时在 context 编码后卸载模型；"
@@ -172,7 +191,7 @@ def execute_director_plan(
                 "v2v/i2v segments without cache fall back to source video for merge."
             )
 
-    def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
+    def _run_one_segment(seg, *, progress_index: int) -> tuple[torch.Tensor, torch.Tensor | None]:
         meta = {
             "frames_label": _frames_label(seg),
             "task_key": seg.task_key,
@@ -301,7 +320,7 @@ def execute_director_plan(
             phase_max=1,
             **meta,
         )
-        samples_high, _ = sampler.process(
+        samples_high, denoised_high = sampler.process(
             model=model_high,
             image_embeds=image_embeds,
             scheduler=scheduler_high,
@@ -322,73 +341,127 @@ def execute_director_plan(
             **meta,
         )
 
-        report_director_progress(
-            node_id,
-            segment_index=progress_index,
-            segment_total=seg_total,
-            phase="low_noise",
-            phase_value=0,
-            phase_max=1,
-            **meta,
-        )
-        samples_low, _ = sampler.process(
-            model=model_low,
-            image_embeds=image_embeds,
-            scheduler=scheduler_low,
-            text_embeds=text_embeds,
-            samples=samples_high,
-            cfg=low_noise_cfg,
-            seed=low_noise_seed,
-            force_offload=low_noise_force_offload,
-            add_noise_to_samples=low_noise_add_noise_to_samples,
-            extra_args=low_extra,
-        )
-        report_director_progress(
-            node_id,
-            segment_index=progress_index,
-            segment_total=seg_total,
-            phase="low_noise",
-            phase_value=1,
-            phase_max=1,
-            **meta,
-        )
+        high_noise_chunk = None
+        decoded_high = None
+        if high_noise_only:
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="decode",
+                phase_value=0,
+                phase_max=1,
+                **meta,
+            )
+            decoded, = decoder.decode(
+                vae=vae,
+                samples=samples_high,
+                enable_vae_tiling=enable_vae_tiling,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                tile_stride_x=tile_stride_x,
+                tile_stride_y=tile_stride_y,
+                normalization=normalization,
+            )
+            decoded = _align_decoded_frames(decoded, target_len)
 
-        report_director_progress(
-            node_id,
-            segment_index=progress_index,
-            segment_total=seg_total,
-            phase="decode",
-            phase_value=0,
-            phase_max=1,
-            **meta,
-        )
-        decoded, = decoder.decode(
-            vae=vae,
-            samples=samples_low,
-            enable_vae_tiling=enable_vae_tiling,
-            tile_x=tile_x,
-            tile_y=tile_y,
-            tile_stride_x=tile_stride_x,
-            tile_stride_y=tile_stride_y,
-            normalization=normalization,
-        )
-        report_director_progress(
-            node_id,
-            segment_index=progress_index,
-            segment_total=seg_total,
-            phase="decode",
-            phase_value=1,
-            phase_max=1,
-            **meta,
-        )
+            high_noise_samples = denoised_high if _latent_has_samples(denoised_high) else samples_high
+            decoded_high, = decoder.decode(
+                vae=vae,
+                samples=high_noise_samples,
+                enable_vae_tiling=enable_vae_tiling,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                tile_stride_x=tile_stride_x,
+                tile_stride_y=tile_stride_y,
+                normalization=normalization,
+            )
+            decoded_high = _align_decoded_frames(decoded_high, target_len)
+            high_noise_chunk = decoded_high.cpu().float()
+            save_segment_cache(node_id, seg, plan, high_noise_chunk, variant="high_noise")
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="decode",
+                phase_value=1,
+                phase_max=1,
+                **meta,
+            )
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="low_noise",
+                phase_value=1,
+                phase_max=1,
+                **meta,
+            )
+            chunk = decoded.cpu().float()
+            samples_low = None
+        else:
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="low_noise",
+                phase_value=0,
+                phase_max=1,
+                **meta,
+            )
+            samples_low, _ = sampler.process(
+                model=model_low,
+                image_embeds=image_embeds,
+                scheduler=scheduler_low,
+                text_embeds=text_embeds,
+                samples=samples_high,
+                cfg=low_noise_cfg,
+                seed=low_noise_seed,
+                force_offload=low_noise_force_offload,
+                add_noise_to_samples=low_noise_add_noise_to_samples,
+                extra_args=low_extra,
+            )
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="low_noise",
+                phase_value=1,
+                phase_max=1,
+                **meta,
+            )
 
-        if decoded.shape[0] > target_len:
-            decoded = decoded[:target_len]
-        elif decoded.shape[0] < target_len and decoded.shape[0] > 0:
-            pad = decoded[-1:].repeat(target_len - decoded.shape[0], 1, 1, 1)
-            decoded = torch.cat([decoded, pad], dim=0)
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="decode",
+                phase_value=0,
+                phase_max=1,
+                **meta,
+            )
+            decoded, = decoder.decode(
+                vae=vae,
+                samples=samples_low,
+                enable_vae_tiling=enable_vae_tiling,
+                tile_x=tile_x,
+                tile_y=tile_y,
+                tile_stride_x=tile_stride_x,
+                tile_stride_y=tile_stride_y,
+                normalization=normalization,
+            )
+            report_director_progress(
+                node_id,
+                segment_index=progress_index,
+                segment_total=seg_total,
+                phase="decode",
+                phase_value=1,
+                phase_max=1,
+                **meta,
+            )
 
-        chunk = decoded.cpu().float()
+            decoded = _align_decoded_frames(decoded, target_len)
+            chunk = decoded.cpu().float()
         save_segment_cache(node_id, seg, plan, chunk)
 
         if plan.global_task_key in {"t2i", "i2i", "r2i"} and decoded.shape[0] >= 1:
@@ -423,7 +496,7 @@ def execute_director_plan(
                 log.debug("Segment video preview skipped: %s", exc)
 
         if clear_vram_between_segments:
-            del text_embeds, image_embeds, samples_high, samples_low, decoded, clip, source_arg, raw_clip
+            del text_embeds, image_embeds, samples_high, denoised_high, samples_low, decoded, decoded_high, clip, source_arg, raw_clip
             cleanup_segment_vram(enabled=True)
 
         reports.append(
@@ -437,24 +510,31 @@ def execute_director_plan(
             target_len,
             seg.task_key,
         )
-        return chunk
+        return chunk, high_noise_chunk
 
     for seg in all_segments:
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
-            chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
+            chunk, high_noise_chunk = _run_one_segment(seg, progress_index=progress_pos[seg.index])
             segment_outputs.append(chunk)
+            if high_noise_chunk is not None:
+                high_noise_segment_outputs.append(high_noise_chunk)
             if plan.export_mode == "all":
                 output_chunks.append(chunk)
+                if high_noise_chunk is not None:
+                    high_noise_output_chunks.append(high_noise_chunk)
             continue
 
         if plan.export_mode != "all":
             continue
 
         cached = load_segment_cache(node_id, seg, plan)
+        high_cached = load_segment_cache(node_id, seg, plan, variant="high_noise") if high_noise_only else None
         if cached is not None:
             cached = pad_or_trim_frames(cached, seg.frame_count).cpu().float()
+            if high_cached is not None:
+                high_cached = pad_or_trim_frames(high_cached, seg.frame_count).cpu().float()
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: "
                 f"loaded from cache ({cached.shape[0]} frames)"
@@ -468,6 +548,7 @@ def execute_director_plan(
                         seg.index + 1,
                     )
                     save_segment_cache(node_id, seg, plan, cached)
+                    high_cached = cached
                     reports.append(
                         f"Segment {seg.index + 1}/{len(all_segments)}: "
                         f"source passthrough ({cached.shape[0]} frames, no prior cache)"
@@ -486,7 +567,11 @@ def execute_director_plan(
                 "Partial re-run with 「全部导出」 requires cached results for skipped segments "
                 "(v2v/i2v may use source video or uploaded image when available)."
             )
+        if high_noise_only and high_cached is None:
+            high_cached = cached
         output_chunks.append(cached.float())
+        if high_cached is not None:
+            high_noise_output_chunks.append(high_cached.float())
 
     if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
@@ -494,4 +579,9 @@ def execute_director_plan(
     report_director_finish(node_id, seg_total)
 
     combined = cat_frames_variable_size(output_chunks) if output_chunks else cat_frames_variable_size(segment_outputs)
-    return combined, segment_outputs, "\n".join(reports)
+    high_noise_combined = None
+    if high_noise_output_chunks:
+        high_noise_combined = cat_frames_variable_size(high_noise_output_chunks)
+    elif high_noise_segment_outputs:
+        high_noise_combined = cat_frames_variable_size(high_noise_segment_outputs)
+    return combined, segment_outputs, high_noise_combined, high_noise_segment_outputs, "\n".join(reports)
