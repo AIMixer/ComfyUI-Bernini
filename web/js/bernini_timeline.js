@@ -1434,7 +1434,12 @@ class BerniniDirectorEditor {
 
     normalizeRunSelection() {
         const n = this.getRunnableSegmentCount();
-        if (!this.isRunSelectEnabled() || n < 1) return;
+        if (n < 2) {
+            this.timeline.runSelectEnabled = false;
+            this.timeline.runSelection = [];
+            return;
+        }
+        if (!this.isRunSelectEnabled()) return;
         this.timeline.runSelection = [...new Set(
             (this.timeline.runSelection || []).filter((i) => i >= 0 && i < n),
         )].sort((a, b) => a - b);
@@ -1488,6 +1493,10 @@ class BerniniDirectorEditor {
 
     updateRunSelectUI() {
         const n = this.getRunnableSegmentCount();
+        if (n < 2) {
+            this.timeline.runSelectEnabled = false;
+            this.timeline.runSelection = [];
+        }
         const canRunSelect = this.supportsRunSelect();
         const enabled = this.isRunSelectEnabled() && canRunSelect;
         const useBatchBar = this.isImageBatch() && canRunSelect;
