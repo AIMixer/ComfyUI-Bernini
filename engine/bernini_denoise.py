@@ -177,9 +177,10 @@ def run_bernini_denoise(
     cfg: BerniniDenoiseConfig,
     latent: torch.Tensor,
     callback=None,
-) -> torch.Tensor:
-    """Run the slim Bernini denoise loop; returns latent tensor [C, T, H, W]."""
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the slim Bernini denoise loop; returns (latent [C,T,H,W], last preview latent or None)."""
     log.info("Bernini runtime active")
+    last_callback_latent = None
     momentum_buf = _build_momentum_buffer(cfg)
     positive_all = cfg.text_embeds["prompt_embeds"]
     negative_all = cfg.text_embeds["negative_prompt_embeds"]
@@ -252,8 +253,8 @@ def run_bernini_denoise(
             )
 
         if callback is not None:
-            callback_latent = (z - noise_pred * t.to(cfg.device) / 1000).detach()
-            callback(idx, callback_latent.permute(1, 0, 2, 3), None, len(cfg.timesteps))
+            last_callback_latent = (z - noise_pred * t.to(cfg.device) / 1000).detach()
+            callback(idx, last_callback_latent.permute(1, 0, 2, 3), None, len(cfg.timesteps))
         else:
             pbar.update(1)
 
@@ -282,4 +283,4 @@ def run_bernini_denoise(
 
     mm.soft_empty_cache()
     gc.collect()
-    return latent
+    return latent, last_callback_latent

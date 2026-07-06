@@ -683,6 +683,7 @@
       },
       "widgets_values": [
         "euler",
+        "simple",
         8,
         5,
         0,
@@ -719,6 +720,7 @@
       },
       "widgets_values": [
         "euler",
+        "simple",
         8,
         5,
         4,

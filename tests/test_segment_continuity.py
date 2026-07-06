@@ -11,7 +11,9 @@ from bernini.director.segment_continuity import (
     force_prev_tail_pixels,
     match_opening_appearance_colors,
     resolve_continuity_guide_frames,
+    resolve_continuity_lock_pixels,
     resolve_continuity_settings,
+    resolve_segment_generation_frames,
     soft_blend_segment_opening,
 )
 
@@ -57,6 +59,32 @@ def test_resolve_continuity_guide_frames_default_overlap():
     assert resolve_continuity_guide_frames(9) == (1, 1, 0, 0, 0)
     assert resolve_continuity_guide_frames(13) == (1, 1, 0, 0, 0)
     assert resolve_continuity_guide_frames(5) == (1, 1, 0, 0, 0)
+
+
+def test_resolve_continuity_lock_pixels_uses_full_overlap():
+    assert resolve_continuity_lock_pixels(13) == 13
+    assert resolve_continuity_lock_pixels(9) == 9
+    assert resolve_continuity_lock_pixels(10) == 13
+
+
+def test_resolve_segment_generation_frames_adds_overlap_for_later_segments():
+    frames, trim = resolve_segment_generation_frames(
+        segment_frame_count=34,
+        segment_index=0,
+        continuity_enabled=True,
+        continuity_overlap=13,
+    )
+    assert trim == 0
+    assert frames == 37
+
+    frames2, trim2 = resolve_segment_generation_frames(
+        segment_frame_count=34,
+        segment_index=1,
+        continuity_enabled=True,
+        continuity_overlap=13,
+    )
+    assert trim2 == 13
+    assert frames2 == 49
 
 
 def test_concat_continuous_chunks_plain_join():

@@ -199,7 +199,14 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             end_idx = idxs[-1].item()
     elif isinstance(end_step, int):
         if end_step != -1:
-            end_idx = end_step - 1
+            end_idx = min(end_step - 1, len(timesteps) - 1)
+
+    if start_idx > end_idx:
+        raise ValueError(
+            f"Bernini Scheduler produced no timesteps (steps={steps}, start_step={start_step}, end_step={end_step}). "
+            "For split high/low schedules with N total steps, HIGH end_step and LOW start_step must match the split "
+            "(e.g. steps=8: HIGH start=0 end=4, LOW start=4 end=1000; LightX2V steps=4: HIGH end=2, LOW start=2)."
+        )
 
     # Slice timesteps and sigmas once, based on indices
     all_timesteps = timesteps
@@ -215,5 +222,12 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
     setattr(sample_scheduler, 'all_timesteps', all_timesteps)
+
+    if len(timesteps) == 0 or torch.isnan(timesteps).any():
+        raise ValueError(
+            f"Bernini Scheduler produced invalid timesteps {timesteps.tolist()} "
+            f"(steps={steps}, start_step={start_step}, end_step={end_step}, shift={shift}). "
+            f"Flow-match schedulers require shift > 0 (default {5.0})."
+        )
 
     return sample_scheduler, timesteps, start_idx, end_idx

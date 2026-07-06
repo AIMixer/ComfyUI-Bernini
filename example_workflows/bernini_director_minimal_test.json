@@ -250,7 +250,7 @@
       "mode": 0,
       "title": "Scheduler HIGH",
       "properties": { "Node name for S&R": "BerniniScheduler" },
-      "widgets_values": ["euler", 8, 5, 0, 4, false],
+      "widgets_values": ["euler", "simple", 8, 5, 0, 4, false],
       "outputs": [{ "name": "scheduler", "type": "WANVIDEOSCHEDULER", "links": [4] }]
     },
     {
@@ -263,7 +263,7 @@
       "mode": 0,
       "title": "Scheduler LOW",
       "properties": { "Node name for S&R": "BerniniScheduler" },
-      "widgets_values": ["euler", 8, 5, 4, 1000, false],
+      "widgets_values": ["euler", "simple", 8, 5, 4, 1000, false],
       "outputs": [{ "name": "scheduler", "type": "WANVIDEOSCHEDULER", "links": [5] }]
     },
     {

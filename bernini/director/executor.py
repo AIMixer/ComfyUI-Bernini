@@ -29,6 +29,7 @@ from .segment_continuity import (
     concat_continuous_chunks,
     resolve_continuity_guide_frames,
     resolve_prev_segment_output,
+    resolve_segment_generation_frames,
     match_opening_appearance_colors,
     soft_blend_segment_opening,
 )
@@ -192,7 +193,8 @@ def execute_director_plan(
 
     if plan.continuity_enabled:
         reports.append(
-            "Segment continuity: light gen guide (motion ctx + 1f ref); plain concat export"
+            "Segment continuity: SCAIL latent prefix lock + ref guide; "
+            "extra overlap generated then trimmed per segment"
         )
 
     def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
@@ -224,8 +226,15 @@ def execute_director_plan(
             clip = fit_video_long_edge(raw_clip, plan.ref_max_size)
         if is_one_frame_i2v:
             num_frames = wan_align_frame_count(target_len)
+            prefix_trim = 0
         else:
-            clip, num_frames = prepare_segment_clip(clip, target_len)
+            gen_frames, prefix_trim = resolve_segment_generation_frames(
+                segment_frame_count=target_len,
+                segment_index=seg.index,
+                continuity_enabled=plan.continuity_enabled,
+                continuity_overlap=plan.continuity_overlap_frames,
+            )
+            clip, num_frames = prepare_segment_clip(clip, gen_frames)
 
         report_director_progress(
             node_id,
@@ -321,11 +330,12 @@ def execute_director_plan(
             **ref_kwargs,
         )
         prev_tail_output = None
+        scail_init = None
         if plan.continuity_enabled:
             prev_tail_output = resolve_prev_segment_output(
                 plan, all_segments, seg.index, completed_outputs, node_id
             )
-            _, image_embeds, _, continuity_note = apply_scail_continuity(
+            scail_init, image_embeds, _, continuity_note = apply_scail_continuity(
                 plan=plan,
                 seg=seg,
                 prev_output=prev_tail_output,
@@ -371,8 +381,8 @@ def execute_director_plan(
             cfg=high_noise_cfg,
             seed=high_noise_seed,
             force_offload=high_noise_force_offload,
-            add_noise_to_samples=high_noise_add_noise_to_samples,
-            samples=None,
+            add_noise_to_samples=True if scail_init is not None else high_noise_add_noise_to_samples,
+            samples=scail_init,
             extra_args=high_extra,
         )
         report_director_progress(
@@ -445,6 +455,8 @@ def execute_director_plan(
             **meta,
         )
 
+        if prefix_trim > 0 and decoded.shape[0] > prefix_trim:
+            decoded = decoded[prefix_trim:]
         if decoded.shape[0] > target_len:
             decoded = decoded[:target_len]
         elif decoded.shape[0] < target_len and decoded.shape[0] > 0:

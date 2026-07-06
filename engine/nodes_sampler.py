@@ -10,6 +10,12 @@ import inspect
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, scheduler_list
+from .wanvideo.schedulers.ksampler_bridge import (
+    attach_scheduler_timesteps,
+    normalize_wanvideo_schedulerv2_inputs,
+    resolve_bernini_scheduler,
+    resolve_sigma_schedule,
+)
 from .gguf.gguf import set_lora_params_gguf
 from .utils import(log, print_memory, apply_lora, fourier_filter, optimized_scale, setup_radial_attention,
                    compile_model, dict_to_device, tangential_projection, get_raag_guidance, temporal_score_rescaling, offload_transformer, init_blockswap,
@@ -45,6 +51,71 @@ def _latent_noise_mask_to_thw(noise_mask: torch.Tensor) -> torch.Tensor:
 offload_device = mm.unet_offload_device()
 
 rope_functions = ["default", "comfy", "comfy_chunked"]
+
+
+def _send_scheduler_sigma_plot(unique_id, sample_scheduler, start_idx, end_idx) -> None:
+    try:
+        from server import PromptServer
+        import io
+        import base64
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    if not unique_id or PromptServer is None:
+        return
+    try:
+        sigmas_np = sample_scheduler.full_sigmas.cpu().numpy()
+        if not np.isclose(sigmas_np[-1], 0.0, atol=1e-6):
+            sigmas_np = np.append(sigmas_np, 0.0)
+        buf = io.BytesIO()
+        fig = plt.figure(facecolor='#353535')
+        ax = fig.add_subplot(111)
+        ax.set_facecolor('#353535')
+        x_values = range(0, len(sigmas_np))
+        ax.plot(x_values, sigmas_np)
+        ax.scatter(x_values, sigmas_np, color='white', s=20, zorder=3)
+        for x, y in zip(x_values, sigmas_np):
+            show_annotation = len(sigmas_np) <= 10
+            is_split_step = (start_idx > 0 and x == start_idx) or (end_idx != -1 and x == end_idx + 1)
+            if show_annotation or is_split_step:
+                color = 'yellow' if is_split_step else 'orange'
+                ax.annotate(
+                    f"{y:.3f}", (x, y), textcoords="offset points",
+                    xytext=(10, 1), ha='center', color=color, fontsize=12,
+                )
+        ax.set_xticks(x_values)
+        ax.set_title("Sigmas", color='white')
+        ax.set_xlabel("Step", color='white')
+        ax.set_ylabel("Sigma Value", color='white')
+        ax.tick_params(axis='x', colors='white', labelsize=10)
+        ax.tick_params(axis='y', colors='white', labelsize=10)
+        end_idx_plot = end_idx + 1
+        if end_idx_plot != -1 and 0 <= end_idx_plot < len(sigmas_np) - 1:
+            ax.axvline(end_idx_plot, color='red', linestyle='--', linewidth=2, label='end_step split')
+        if start_idx > 0 and 0 <= start_idx < len(sigmas_np):
+            ax.axvline(start_idx, color='green', linestyle='--', linewidth=2, label='start_step split')
+        if (end_idx_plot != -1 and 0 <= end_idx_plot < len(sigmas_np)) or (start_idx > 0 and 0 <= start_idx < len(sigmas_np)):
+            handles, labels = ax.get_legend_handles_labels()
+            if labels:
+                ax.legend()
+        range_start_idx = start_idx if start_idx > 0 else 0
+        range_end_idx = end_idx_plot if end_idx_plot > 0 and end_idx_plot < len(sigmas_np) else len(sigmas_np) - 1
+        if range_start_idx < range_end_idx:
+            ax.axvspan(range_start_idx, range_end_idx, color='lightblue', alpha=0.1, label='Sampled Range')
+        plt.tight_layout()
+        plt.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        buf.close()
+        html_img = (
+            f"<img src='data:image/png;base64,{img_base64}' alt='Sigmas Plot' "
+            "style='max-width:100%; height:100%; overflow:hidden; display:block;'>"
+        )
+        PromptServer.instance.send_progress_text(html_img, unique_id)
+    except Exception as exc:
+        log.error(f"Failed to send sigmas plot: {exc}")
+
 
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
@@ -223,6 +294,19 @@ class WanVideoSampler:
         if isinstance(scheduler, dict):
             sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
             timesteps = scheduler["timesteps"]
+            stored_sigmas = scheduler.get("sigmas")
+            sample_scheduler, timesteps = attach_scheduler_timesteps(
+                sample_scheduler,
+                timesteps,
+                device=device,
+                stored_sigmas=stored_sigmas,
+            )
+            if sample_scheduler.sigmas is not None:
+                log.info(
+                    "Bernini Sampler loaded scheduler dict: %d step(s), sigmas=%s",
+                    len(timesteps),
+                    [round(float(s), 4) for s in sample_scheduler.sigmas.tolist()],
+                )
             start_step = scheduler.get("start_step", start_step)
         elif scheduler != "multitalk":
             sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer.dim, denoise_strength, sigmas=sigmas, log_timesteps=True)
@@ -717,13 +801,29 @@ class WanVideoSampler:
                 if input_samples.shape[1] != noise.shape[1]:
                     input_samples = torch.cat([input_samples[:, :1].repeat(1, noise.shape[1] - input_samples.shape[1], 1, 1), input_samples], dim=1)
 
+                raw_noise_mask = samples.get("noise_mask", None)
                 if add_noise_to_samples:
                     latent_timestep = timesteps[:1].to(noise)
-                    noise = noise * latent_timestep / 1000 + (1 - latent_timestep / 1000) * input_samples
+                    blended = noise * latent_timestep / 1000 + (1 - latent_timestep / 1000) * input_samples
+                    if raw_noise_mask is not None:
+                        # SCAIL continuity: only blend prefix from input_samples; suffix keeps full noise.
+                        nm = _latent_noise_mask_to_thw(raw_noise_mask.to(noise.device))
+                        if nm.shape[0] < noise.shape[1]:
+                            nm = nm.repeat(noise.shape[1] // nm.shape[0], 1, 1)
+                        nm = torch.nn.functional.interpolate(
+                            nm.unsqueeze(0).unsqueeze(0),
+                            size=(noise.shape[1], noise.shape[2], noise.shape[3]),
+                            mode='trilinear',
+                            align_corners=False,
+                        ).squeeze(0).squeeze(0)
+                        lock = (1.0 - nm).clamp(0.0, 1.0).unsqueeze(0).expand_as(noise)
+                        noise = blended * lock + noise * (1.0 - lock)
+                    else:
+                        noise = blended
                 else:
                     noise = input_samples
 
-                noise_mask = samples.get("noise_mask", None)
+                noise_mask = raw_noise_mask
                 if noise_mask is not None:
                     input_noise_mask = noise_mask
                     log.info(f"Latent noise_mask shape: {noise_mask.shape}")
@@ -1696,6 +1796,7 @@ class WanVideoSampler:
         else:
             from .latent_preview import prepare_callback #custom for tiny VAE previews
         callback = prepare_callback(patcher, len(timesteps))
+        callback_latent = None
 
         if not multitalk_sampling and not framepack and not wananimate_loop:
             log.info("-" * 10 + " Sampling start " + "-" * 10)
@@ -1795,7 +1896,7 @@ class WanVideoSampler:
                 original_image=original_image.squeeze(0) if original_image is not None else None,
                 noise=noise,
             )
-            latent = run_bernini_denoise(denoise_cfg, latent, callback=callback)
+            latent, callback_latent = run_bernini_denoise(denoise_cfg, latent, callback=callback)
 
         # Main sampling loop with FreeInit iterations (skipped when Bernini runtime ran)
         iterations = 0 if _use_bernini_runtime else (freeinit_args.get("freeinit_num_iters", 3) if freeinit_args is not None else 1)
@@ -2727,7 +2828,7 @@ class WanVideoSampler:
             "latent_ovi_audio": latent_ovi.unsqueeze(0).transpose(1, 2).cpu() if latent_ovi is not None else None,
             "flashvsr_LQ_images": LQ_images,
         },{
-            "samples": callback_latent.unsqueeze(0).cpu() if callback is not None else None,
+            "samples": callback_latent.unsqueeze(0).cpu() if callback_latent is not None else None,
         })
 
 class WanVideoSamplerExtraArgs():
@@ -2841,82 +2942,36 @@ class WanVideoScheduler:
             "timesteps": timesteps,
         }
 
-        try:
-            from server import PromptServer
-            import io
-            import base64
-            import matplotlib.pyplot as plt
-        except Exception:
-            PromptServer = None
-        if unique_id and PromptServer is not None:
-            try:
-                # Plot sigmas and save to a buffer
-                sigmas_np = sample_scheduler.full_sigmas.cpu().numpy()
-                if not np.isclose(sigmas_np[-1], 0.0, atol=1e-6):
-                    sigmas_np = np.append(sigmas_np, 0.0)
-                buf = io.BytesIO()
-                fig = plt.figure(facecolor='#353535')
-                ax = fig.add_subplot(111)
-                ax.set_facecolor('#353535')  # Set axes background color
-                x_values = range(0, len(sigmas_np))
-                ax.plot(x_values, sigmas_np)
-                # Annotate each sigma value
-                ax.scatter(x_values, sigmas_np, color='white', s=20, zorder=3)  # Small dots at each sigma
-                for x, y in zip(x_values, sigmas_np):
-                    # Show all annotations if few steps, or just show split step annotations
-                    show_annotation = len(sigmas_np) <= 10
-                    is_split_step = (start_idx > 0 and x == start_idx) or (end_idx != -1 and x == end_idx + 1)
-
-                    if show_annotation or is_split_step:
-                        color = 'orange'
-                        if is_split_step:
-                            color = 'yellow'
-                        ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points", xytext=(10, 1), ha='center', color=color, fontsize=12)
-                ax.set_xticks(x_values)
-                ax.set_title("Sigmas", color='white')           # Title font color
-                ax.set_xlabel("Step", color='white')            # X label font color
-                ax.set_ylabel("Sigma Value", color='white')     # Y label font color
-                ax.tick_params(axis='x', colors='white', labelsize=10)        # X tick color
-                ax.tick_params(axis='y', colors='white', labelsize=10)        # Y tick color
-                # Add split point if end_step is defined
-                end_idx += 1
-                if end_idx != -1 and 0 <= end_idx < len(sigmas_np) - 1:
-                    ax.axvline(end_idx, color='red', linestyle='--', linewidth=2, label='end_step split')
-                # Add split point if start_step is defined
-                if start_idx > 0 and 0 <= start_idx < len(sigmas_np):
-                    ax.axvline(start_idx, color='green', linestyle='--', linewidth=2, label='start_step split')
-                if (end_idx != -1 and 0 <= end_idx < len(sigmas_np)) or (start_idx > 0 and 0 <= start_idx < len(sigmas_np)):
-                    handles, labels = ax.get_legend_handles_labels()
-                    if labels:
-                        ax.legend()
-                # Draw shaded range
-                range_start_idx = start_idx if start_idx > 0 else 0
-                range_end_idx = end_idx if end_idx > 0 and end_idx < len(sigmas_np) else len(sigmas_np) - 1
-                if range_start_idx < range_end_idx:
-                    ax.axvspan(range_start_idx, range_end_idx, color='lightblue', alpha=0.1, label='Sampled Range')
-
-
-                plt.tight_layout()
-                plt.savefig(buf, format='png')
-                plt.close(fig)
-                buf.seek(0)
-                img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-                buf.close()
-
-                # Send as HTML img tag with base64 data
-                html_img = f"<img src='data:image/png;base64,{img_base64}' alt='Sigmas Plot' style='max-width:100%; height:100%; overflow:hidden; display:block;'>"
-                PromptServer.instance.send_progress_text(html_img, unique_id)
-            except Exception as e:
-                log.error(f"Failed to send sigmas plot: {e}")
-                pass
+        _send_scheduler_sigma_plot(unique_id, sample_scheduler, start_idx, end_idx)
 
         return (sigmas, steps, shift, scheduler_dict, start_step, end_step)
 
 class WanVideoSchedulerv2(WanVideoScheduler):
     @classmethod
     def INPUT_TYPES(s):
+        import comfy.samplers
+
         return {"required": {
-                "scheduler": (scheduler_list, {"default": "unipc"}),
+                "sampler_name": (
+                    comfy.samplers.KSampler.SAMPLERS,
+                    {
+                        "default": "euler",
+                        "tooltip": (
+                            "ComfyUI KSampler sampler_name. Maps to Bernini/Wan denoise algorithm. "
+                            "Default: euler. LightX2V 4-step LoRAs: dpmpp_2m_sde."
+                        ),
+                    },
+                ),
+                "scheduler": (
+                    comfy.samplers.KSampler.SCHEDULERS,
+                    {
+                        "default": "simple",
+                        "tooltip": (
+                            "ComfyUI KSampler scheduler (sigma/noise schedule). "
+                            "Default: simple. LightX2V 4-step LoRAs: sgm_uniform."
+                        ),
+                    },
+                ),
                 "steps": ("INT", {"default": 30, "min": 1, "tooltip": "Number of steps for the scheduler"}),
                 "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "start_step": ("INT", {"default": 0, "min": 0, "tooltip": "Starting step for the scheduler"}),
@@ -2936,10 +2991,63 @@ class WanVideoSchedulerv2(WanVideoScheduler):
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
     EXPERIMENTAL = True
+    DESCRIPTION = (
+        "Bernini Scheduler with ComfyUI KSampler sampler_name + scheduler lists. "
+        "Default: euler + simple. LightX2V 4-step: dpmpp_2m_sde + sgm_uniform, steps=4."
+    )
 
-    def process(self, *args, **kwargs):
-        sigmas, steps, shift, scheduler_dict, start_step, end_step = super().process(*args, **kwargs)
-        return scheduler_dict,
+    def process(
+        self,
+        sampler_name,
+        scheduler,
+        steps,
+        shift,
+        start_step,
+        end_step,
+        unique_id,
+        sigmas=None,
+        enhance_hf=False,
+    ):
+        (
+            sampler_name,
+            scheduler,
+            steps,
+            shift,
+            start_step,
+            end_step,
+            enhance_hf,
+        ) = normalize_wanvideo_schedulerv2_inputs(
+            sampler_name, scheduler, steps, shift, start_step, end_step, enhance_hf
+        )
+        bernini_scheduler = resolve_bernini_scheduler(sampler_name)
+        selected_sigmas = resolve_sigma_schedule(
+            sigmas=sigmas,
+            scheduler=scheduler,
+            steps=int(steps),
+            device=device,
+        )
+        sample_scheduler, timesteps, start_idx, end_idx = get_scheduler(
+            bernini_scheduler,
+            steps,
+            start_step,
+            end_step,
+            shift,
+            device,
+            sigmas=selected_sigmas,
+            log_timesteps=True,
+            enhance_hf=enhance_hf,
+        )
+        scheduler_dict = {
+            "sample_scheduler": sample_scheduler,
+            "timesteps": timesteps,
+            "sigmas": sample_scheduler.sigmas.clone(),
+            "steps": int(steps),
+            "shift": float(shift),
+            "start_step": int(start_step),
+            "end_step": int(end_step) if isinstance(end_step, int) else end_step,
+        }
+        _send_scheduler_sigma_plot(unique_id, sample_scheduler, start_idx, end_idx)
+        return (scheduler_dict,)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoSamplerv2": WanVideoSamplerv2,

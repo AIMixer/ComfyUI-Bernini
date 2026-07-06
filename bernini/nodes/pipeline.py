@@ -47,7 +47,14 @@ BerniniSetLoRAs = _rebrand(WanVideoSetLoRAs, "Bernini Set LoRAs")
 BerniniTorchCompile = _rebrand(WanVideoTorchCompileSettings, "Bernini Torch Compile")
 BerniniContextOptions = _rebrand(WanVideoContextOptions, "Bernini Context Options")
 BerniniSamplerExtraArgs = _rebrand(WanVideoSamplerExtraArgs, "Bernini Sampler Extra Args")
-BerniniScheduler = _rebrand(WanVideoSchedulerv2, "Bernini Scheduler")
+
+
+class BerniniScheduler(WanVideoSchedulerv2):
+    """BerniniDirector scheduler: Comfy KSampler sampler_name + scheduler."""
+
+    CATEGORY = _CATEGORY
+
+
 BerniniSampler = _rebrand(WanVideoSamplerv2, "Bernini Sampler")
 BerniniDecode = _rebrand(WanVideoDecode, "Bernini Decode")
 

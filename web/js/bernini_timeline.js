@@ -542,7 +542,9 @@ function stopDomEvent(e) {
 }
 
 function hideWidget(w) {
-    if (!w || w._bdGroupHeader) return;
+    if (!w) return;
+    // Group headers in HIDDEN_WIDGETS (e.g. bd_grp_pe) duplicate timeline panel sections — hide them too.
+    if (w._bdGroupHeader && !HIDDEN_WIDGETS.includes(w.name)) return;
     w.hidden = true;
     if (!w.options) w.options = {};
     w.options.hidden = true;

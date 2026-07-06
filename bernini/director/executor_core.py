@@ -40,6 +40,7 @@ from .segment_continuity import (
     concat_continuous_chunks,
     resolve_continuity_guide_frames,
     resolve_prev_segment_output,
+    resolve_segment_generation_frames,
     match_opening_appearance_colors,
     soft_blend_segment_opening,
 )
@@ -115,7 +116,8 @@ def execute_director_plan_core(
     completed_outputs: dict[int, torch.Tensor] = {}
     if plan.continuity_enabled:
         reports.append(
-            "Segment continuity: light gen guide (motion ctx + 1f ref); plain concat export"
+            "Segment continuity: SCAIL latent prefix lock + ref guide; "
+            "extra overlap generated then trimmed per segment"
         )
 
     def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
@@ -147,8 +149,15 @@ def execute_director_plan_core(
             clip_frames = fit_video_long_edge(raw_clip, plan.ref_max_size)
         if is_one_frame_i2v:
             num_frames = wan_align_frame_count(target_len)
+            prefix_trim = 0
         else:
-            clip_frames, num_frames = prepare_segment_clip(clip_frames, target_len)
+            gen_frames, prefix_trim = resolve_segment_generation_frames(
+                segment_frame_count=target_len,
+                segment_index=seg.index,
+                continuity_enabled=plan.continuity_enabled,
+                continuity_overlap=plan.continuity_overlap_frames,
+            )
+            clip_frames, num_frames = prepare_segment_clip(clip_frames, gen_frames)
 
         report_director_progress(
             node_id,
@@ -246,7 +255,7 @@ def execute_director_plan_core(
             prev_tail_output = resolve_prev_segment_output(
                 plan, all_segments, seg.index, completed_outputs, node_id
             )
-            positive, negative, continuity_note = apply_scail_continuity_core(
+            positive, negative, latent, continuity_note = apply_scail_continuity_core(
                 plan=plan,
                 seg=seg,
                 prev_output=prev_tail_output,
@@ -256,6 +265,7 @@ def execute_director_plan_core(
                 width=ctx_w,
                 height=ctx_h,
                 ref_max_size=plan.ref_max_size,
+                latent=latent,
             )
             if continuity_note:
                 reports.append(continuity_note)
@@ -335,6 +345,8 @@ def execute_director_plan_core(
             **meta,
         )
 
+        if prefix_trim > 0 and decoded.shape[0] > prefix_trim:
+            decoded = decoded[prefix_trim:]
         if decoded.shape[0] > target_len:
             decoded = decoded[:target_len]
         elif decoded.shape[0] < target_len and decoded.shape[0] > 0:

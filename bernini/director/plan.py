@@ -579,12 +579,12 @@ def plan_summary(plan: DirectorPlan) -> str:
     export_label = "分段导出" if plan.export_mode == "segments" else "全部导出"
     lines.append(f"Export mode: {export_label}")
     if plan.continuity_enabled:
-        from .segment_continuity import resolve_continuity_guide_frames
+        from .segment_continuity import resolve_continuity_lock_pixels
 
-        ctx, refs, _, _, _ = resolve_continuity_guide_frames(plan.continuity_overlap_frames)
+        lock_px = resolve_continuity_lock_pixels(plan.continuity_overlap_frames)
         lines.append(
             f"Segment continuity: overlap {plan.continuity_overlap_frames} "
-            f"→ {ctx}f ctx + {refs}f ref, plain concat (gen-only)"
+            f"→ SCAIL lock {lock_px}f + 1f ref, trim prefix after decode"
         )
     if plan.run_indices is not None:
         selected = sorted(plan.run_indices)

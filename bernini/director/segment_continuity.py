@@ -53,12 +53,33 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
     return True, overlap
 
 
+def resolve_continuity_lock_pixels(overlap_frames: int) -> int:
+    """Wan-aligned pixel prefix locked via SCAIL noise_mask (uses full UI overlap)."""
+    ov = max(MIN_CONTINUITY_OVERLAP, min(MAX_CONTINUITY_OVERLAP, int(overlap_frames)))
+    return wan_align_frame_count(ov)
+
+
 def resolve_continuity_guide_frames(overlap_frames: int) -> tuple[int, int, int, int, int]:
     """Map UI overlap → (context_px, tail_refs, seam_blend, opening_blend, color_match)."""
     ov = max(MIN_CONTINUITY_OVERLAP, int(overlap_frames))
     ctx = wan_align_frame_count(min(ov, MAX_CONTINUITY_CONTEXT_FRAMES))
     refs = min(MAX_CONTINUITY_REF_FRAMES, max(1, min(ov, MAX_CONTINUITY_REF_FRAMES)))
     return ctx, refs, 0, 0, 0
+
+
+def resolve_segment_generation_frames(
+    *,
+    segment_frame_count: int,
+    segment_index: int,
+    continuity_enabled: bool,
+    continuity_overlap: int,
+) -> tuple[int, int]:
+    """Return (wan_aligned_gen_frames, prefix_trim_after_decode) for SCAIL handoff."""
+    base = wan_align_frame_count(max(1, int(segment_frame_count)))
+    if not continuity_enabled or segment_index <= 0:
+        return base, 0
+    lock_px = resolve_continuity_lock_pixels(continuity_overlap)
+    return wan_align_frame_count(base + lock_px), lock_px
 
 
 # Legacy helper default (no longer used on export path).
@@ -162,7 +183,12 @@ def apply_scail_prefix_to_latent(
     if samples.ndim == 4:
         samples = samples.unsqueeze(0)
     _, c, t_total, h, w = samples.shape
-    t_tail = min(int(tail_latent.shape[1]), _latent_frame_count(overlap_pixel_frames), t_total)
+    aligned_pixels = wan_align_frame_count(int(overlap_pixel_frames))
+    t_tail = min(
+        int(tail_latent.shape[1]),
+        _latent_frame_count(aligned_pixels),
+        t_total,
+    )
     if t_tail <= 0:
         return latent
 
@@ -657,19 +683,23 @@ def apply_scail_continuity(
     force_offload: bool = True,
     comfy_core: bool = False,
 ) -> tuple[dict[str, torch.Tensor] | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
-    """Context + ref guidance from prev tail (no latent lock). Strength follows UI overlap."""
-    del target_shape, latent
+    """SCAIL latent prefix lock + light context/ref streams from prev tail."""
+    del latent
     if not _continuity_active(plan, seg) or prev_output is None:
         return None, image_embeds, None, None
 
-    ctx_frames, ref_frames, seam_blend, _, _ = resolve_continuity_guide_frames(
-        plan.continuity_overlap_frames
+    lock_px = min(
+        resolve_continuity_lock_pixels(plan.continuity_overlap_frames),
+        int(prev_output.shape[0]),
     )
-    ctx_frames = min(ctx_frames, int(prev_output.shape[0]))
-    if ctx_frames <= 0:
+    if lock_px <= 0:
         return None, image_embeds, None, None
 
-    tail_clip = fit_canvas(prev_output[-ctx_frames:], width, height)
+    _, ref_frames, seam_blend, _, _ = resolve_continuity_guide_frames(
+        plan.continuity_overlap_frames
+    )
+
+    tail_clip = fit_canvas(prev_output[-lock_px:], width, height)
     tail_latent = encode_tail_clip(
         tail_clip,
         vae=vae,
@@ -679,6 +709,22 @@ def apply_scail_continuity(
         force_offload=force_offload,
         comfy_core=comfy_core,
     )
+
+    scail_init = None
+    if target_shape is not None:
+        scail_init = build_scail_continuity_init(
+            target_shape,
+            tail_latent,
+            lock_px,
+        )
+        if scail_init is not None:
+            t_lock = _latent_frame_count(wan_align_frame_count(lock_px))
+            log.info(
+                "Segment continuity seg #%d: SCAIL lock %df (%d latent prefix)",
+                seg.index + 1,
+                lock_px,
+                t_lock,
+            )
 
     if image_embeds is not None:
         image_embeds = insert_tail_context_after_source(image_embeds, tail_latent)
@@ -696,19 +742,19 @@ def apply_scail_continuity(
         )
         stream_count = len(image_embeds.get("context_latents") or [])
         log.info(
-            "Segment continuity seg #%d: %df ctx + %d ref (%d streams), seam=%d",
+            "Segment continuity seg #%d: + %d ref, %d context stream(s), seam=%d",
             seg.index + 1,
-            ctx_frames,
             ref_frames,
             stream_count,
             seam_blend,
         )
 
+    t_lock = _latent_frame_count(wan_align_frame_count(lock_px))
     note = (
-        f"  continuity seg #{seg.index + 1}: {ctx_frames}f ctx + {ref_frames}f ref "
-        f"(overlap {plan.continuity_overlap_frames}, gen-only, no pixel blend)"
+        f"  continuity seg #{seg.index + 1}: SCAIL lock {lock_px}f ({t_lock} latent) "
+        f"+ {ref_frames}f ref (overlap {plan.continuity_overlap_frames})"
     )
-    return None, image_embeds, None, note
+    return scail_init, image_embeds, None, note
 
 
 def apply_scail_continuity_core(
@@ -722,19 +768,24 @@ def apply_scail_continuity_core(
     width: int,
     height: int,
     ref_max_size: int = 848,
-) -> tuple[Any, Any, str | None]:
-    """Core executor: patch conditioning with light tail context (no latent prefix)."""
+    latent: dict[str, Any] | None = None,
+) -> tuple[Any, Any, dict[str, Any] | None, str | None]:
+    """Core executor: SCAIL latent prefix + conditioning context/ref streams."""
     if not _continuity_active(plan, seg) or prev_output is None:
-        return positive, negative, None
+        return positive, negative, latent, None
 
-    ctx_frames, ref_frames, _seam, _opening, _color = resolve_continuity_guide_frames(
+    lock_px = min(
+        resolve_continuity_lock_pixels(plan.continuity_overlap_frames),
+        int(prev_output.shape[0]),
+    )
+    if lock_px <= 0:
+        return positive, negative, latent, None
+
+    _, ref_frames, _seam, _opening, _color = resolve_continuity_guide_frames(
         plan.continuity_overlap_frames
     )
-    ctx_frames = min(ctx_frames, int(prev_output.shape[0]))
-    if ctx_frames <= 0:
-        return positive, negative, None
 
-    tail_clip = fit_canvas(prev_output[-ctx_frames:], width, height)
+    tail_clip = fit_canvas(prev_output[-lock_px:], width, height)
     tail_latent = encode_tail_clip(
         tail_clip,
         vae=vae,
@@ -753,8 +804,11 @@ def apply_scail_continuity_core(
         ref_max_size=ref_max_size,
         n_frames=ref_frames,
     )
+    if latent is not None:
+        latent = apply_scail_prefix_to_latent(latent, tail_latent, lock_px)
+    t_lock = _latent_frame_count(wan_align_frame_count(lock_px))
     note = (
-        f"  continuity seg #{seg.index + 1}: {ctx_frames}f ctx + {ref_frames}f ref "
-        f"(overlap {plan.continuity_overlap_frames}, gen-only, no pixel blend)"
+        f"  continuity seg #{seg.index + 1}: SCAIL lock {lock_px}f ({t_lock} latent) "
+        f"+ {ref_frames}f ref (overlap {plan.continuity_overlap_frames})"
     )
-    return positive, negative, note
+    return positive, negative, latent, note

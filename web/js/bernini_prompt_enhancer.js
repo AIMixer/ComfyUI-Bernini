@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./bernini_gen_timeline.js";
 
 export const PE_PANEL_COLLAPSED_H = 34;
-export const PE_PANEL_EXPANDED_H = 374;
+export const PE_PANEL_EXPANDED_H = 348;
 
 const DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_LLM_MODEL = "qwen3.5";
@@ -75,6 +75,24 @@ function ensurePeStyles() {
     style.textContent = `
 @keyframes bernini-pe-pulse { 0%,100%{opacity:1} 50%{opacity:.65} }
 .bernini-pe-loading { animation: bernini-pe-pulse 1.2s ease-in-out infinite !important; }
+.bernini-pe-label { font-size: 11px; color: #b8c0d0; flex-shrink: 0; white-space: nowrap; }
+.bernini-pe-input, .bernini-pe-select {
+    font-size: 11px; line-height: 1.35; min-height: 28px; box-sizing: border-box;
+    background: #12151b; color: #e8ecf4; border: 1px solid #2a3140; border-radius: 4px;
+}
+.bernini-pe-input { padding: 5px 8px; }
+.bernini-pe-select { padding: 4px 8px; cursor: pointer; }
+.bernini-pe-btn-sm {
+    font-size: 11px; line-height: 1.35; min-height: 28px; box-sizing: border-box;
+    background: #252a34; color: #e8ecf4; border: 1px solid #2a3140; border-radius: 4px;
+    padding: 4px 10px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
+}
+.bernini-pe-api-row { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; }
+.bernini-pe-api-row .bernini-pe-select { flex: 0 1 38%; min-width: 132px; max-width: 220px; }
+.bernini-pe-api-row .bernini-pe-input { flex: 1 1 120px; min-width: 0; }
+.bernini-pe-options-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.bernini-pe-check-item { display: flex; gap: 4px; align-items: center; }
+.bernini-pe-check-item span { font-size: 11px; color: #b8c0d0; }
 `;
     document.head.appendChild(style);
 }
@@ -202,10 +220,11 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(el({ fontSize: "9px", color: "#7d8698", lineHeight: "1.4" },
         "按 Bernini 官方 task 模板扩写短提示词。「当前」仅扩写选中片段/全局；「全部」在分段模式下依次扩写各片段。"));
 
-    const fmtRow = el({ display: "flex", gap: "6px", alignItems: "center" });
-    fmtRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0" }, "API:"));
+    const fmtRow = el({});
+    fmtRow.className = "bernini-pe-api-row";
+    fmtRow.appendChild(el({}, "API:", "span")).className = "bernini-pe-label";
     pe.apiSelect = document.createElement("select");
-    Object.assign(pe.apiSelect.style, { fontSize: "10px", background: "#12151b", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "3px" });
+    pe.apiSelect.className = "bernini-pe-select";
     for (const [val, label] of [
         [API_OLLAMA, "Ollama (/api/chat)"],
         [API_ZHIPU, "智谱 GLM (/paas/v4/chat)"],
@@ -215,6 +234,16 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         o.value = val; o.textContent = label;
         pe.apiSelect.appendChild(o);
     }
+    pe.urlInput = document.createElement("input");
+    pe.urlInput.type = "text";
+    pe.urlInput.placeholder = DEFAULT_LLM_URL;
+    pe.urlInput.className = "bernini-pe-input";
+    pe.urlInput.oninput = () => {
+        pe.apiSelect.value = inferApiFormat(pe.urlInput.value, pe.apiSelect.value);
+        pe.updateApiFormatUI();
+        pe.syncToWidgets();
+    };
+    swallowKeys(pe.urlInput);
     pe.apiSelect.onchange = () => {
         const d = defaultsForApiFormat(pe.apiSelect.value);
         pe.urlInput.value = d.url;
@@ -227,17 +256,20 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         pe.fetchModels();
     };
     fmtRow.appendChild(pe.apiSelect);
-    pe.visionBadge = el({ fontSize: "9px", color: "#4ade80", marginLeft: "auto", display: "none" });
+    fmtRow.appendChild(pe.urlInput);
+    pe.refreshBtn = el({}, "刷新模型", "button");
+    pe.refreshBtn.className = "bernini-pe-btn-sm";
+    pe.refreshBtn.onclick = () => pe.fetchModels();
+    fmtRow.appendChild(pe.refreshBtn);
+    pe.visionBadge = el({ fontSize: "9px", color: "#4ade80", flexShrink: "0", display: "none" });
     fmtRow.appendChild(pe.visionBadge);
     pe.body.appendChild(fmtRow);
 
     const compatRow = el({ display: "none", gap: "6px", alignItems: "center" });
-    compatRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0", flexShrink: "0" }, "OpenAI 特性:"));
+    compatRow.appendChild(el({}, "OpenAI 特性:", "span")).className = "bernini-pe-label";
     pe.compatSelect = document.createElement("select");
-    Object.assign(pe.compatSelect.style, {
-        flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4",
-        border: "1px solid #2a3140", borderRadius: "3px",
-    });
+    pe.compatSelect.className = "bernini-pe-select";
+    Object.assign(pe.compatSelect.style, { flex: "1" });
     for (const [val, label] of [
         [OPENAI_COMPAT_STANDARD, "标准"],
         [OPENAI_COMPAT_LLAMA_SWAP, "llama-swap"],
@@ -255,34 +287,15 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.compatRow = compatRow;
     pe.body.appendChild(compatRow);
 
-    const urlRow = el({ display: "flex", gap: "6px" });
-    pe.urlInput = document.createElement("input");
-    pe.urlInput.type = "text";
-    pe.urlInput.placeholder = DEFAULT_LLM_URL;
-    Object.assign(pe.urlInput.style, { flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "3px", padding: "4px 6px" });
-    pe.urlInput.oninput = () => {
-        pe.apiSelect.value = inferApiFormat(pe.urlInput.value, pe.apiSelect.value);
-        pe.updateApiFormatUI();
-        pe.syncToWidgets();
-    };
-    swallowKeys(pe.urlInput);
-    urlRow.appendChild(pe.urlInput);
-    pe.refreshBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "2px 8px", fontSize: "10px", cursor: "pointer" }, "刷新模型");
-    pe.refreshBtn.onclick = () => pe.fetchModels();
-    urlRow.appendChild(pe.refreshBtn);
-    pe.body.appendChild(urlRow);
-
     const keyRow = el({ display: "flex", gap: "6px", alignItems: "center" });
     keyRow.dataset.r = "pe-key-row";
-    keyRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0", flexShrink: "0" }, "API Key:"));
+    keyRow.appendChild(el({}, "API Key:", "span")).className = "bernini-pe-label";
     pe.apiKeyInput = document.createElement("input");
     pe.apiKeyInput.type = "password";
     pe.apiKeyInput.placeholder = "智谱 API Key";
     pe.apiKeyInput.autocomplete = "off";
-    Object.assign(pe.apiKeyInput.style, {
-        flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4",
-        border: "1px solid #2a3140", borderRadius: "3px", padding: "4px 6px",
-    });
+    pe.apiKeyInput.className = "bernini-pe-input";
+    Object.assign(pe.apiKeyInput.style, { flex: "1" });
     pe.apiKeyInput.oninput = () => pe.syncToWidgets();
     swallowKeys(pe.apiKeyInput);
     keyRow.appendChild(pe.apiKeyInput);
@@ -290,14 +303,12 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(keyRow);
 
     const modelRow = el({ display: "flex", gap: "6px", alignItems: "center" });
-    modelRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0", flexShrink: "0" }, "模型:"));
+    modelRow.appendChild(el({}, "模型:", "span")).className = "bernini-pe-label";
     pe.modelInput = document.createElement("input");
     pe.modelInput.type = "text";
     pe.modelInput.placeholder = DEFAULT_LLM_MODEL;
-    Object.assign(pe.modelInput.style, {
-        flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4",
-        border: "1px solid #2a3140", borderRadius: "3px", padding: "4px 6px",
-    });
+    pe.modelInput.className = "bernini-pe-input";
+    Object.assign(pe.modelInput.style, { flex: "1" });
     pe.modelInput.oninput = () => pe.syncToWidgets();
     swallowKeys(pe.modelInput);
     modelRow.appendChild(pe.modelInput);
@@ -308,12 +319,10 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(modelRow);
 
     const langRow = el({ display: "flex", gap: "6px", alignItems: "center" });
-    langRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0", flexShrink: "0" }, "扩写语言:"));
+    langRow.appendChild(el({}, "扩写语言:", "span")).className = "bernini-pe-label";
     pe.langSelect = document.createElement("select");
-    Object.assign(pe.langSelect.style, {
-        flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4",
-        border: "1px solid #2a3140", borderRadius: "3px",
-    });
+    pe.langSelect.className = "bernini-pe-select";
+    Object.assign(pe.langSelect.style, { flex: "1" });
     for (const [val, label] of [
         [OUTPUT_LANGUAGE_ZH, "中文（简体中文）"],
         ["English", "English（官方推荐）"],
@@ -333,7 +342,15 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     langRow.appendChild(pe.langSelect);
     pe.body.appendChild(langRow);
 
-    const detailRow = el({ display: "flex", gap: "6px", alignItems: "center" });
+    const AUTO_ENHANCE_TIP =
+        "Queue 时在服务端自动用 LLM 扩写每段正向提示词（Bernini 官方 task 模板；"
+        + "可附带源视频帧与参考图）。扩写失败则使用原文，不中断生成。"
+        + "多段任务会每段各调用一次 LLM，耗时会增加。";
+
+    const optionsRow = el({});
+    optionsRow.className = "bernini-pe-options-row";
+    const detailItem = el({});
+    detailItem.className = "bernini-pe-check-item";
     pe.detailCheck = document.createElement("input");
     pe.detailCheck.type = "checkbox";
     pe.detailCheck.checked = false;
@@ -341,36 +358,36 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         "rv2v/r2v/r2i 等含参考图任务：未勾选时按 Bernini 官方模板扩写；"
         + "勾选后启用角色特征增强（≥300汉字详尽外观描述）。";
     pe.detailCheck.onchange = () => pe.syncToWidgets();
-    detailRow.appendChild(pe.detailCheck);
-    const detailLabel = el({ fontSize: "10px", color: "#b8c0d0", cursor: "help" }, "角色特征增强");
+    detailItem.appendChild(pe.detailCheck);
+    const detailLabel = el({ cursor: "help" }, "角色特征增强", "span");
     detailLabel.title = pe.detailCheck.title;
-    detailRow.appendChild(detailLabel);
-    pe.body.appendChild(detailRow);
+    detailItem.appendChild(detailLabel);
+    optionsRow.appendChild(detailItem);
 
-    const AUTO_ENHANCE_TIP =
-        "Queue 时在服务端自动用 LLM 扩写每段正向提示词（Bernini 官方 task 模板；"
-        + "可附带源视频帧与参考图）。扩写失败则使用原文，不中断生成。"
-        + "多段任务会每段各调用一次 LLM，耗时会增加。";
-
-    const autoRow = el({ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", cursor: "help" });
-    autoRow.title = AUTO_ENHANCE_TIP;
+    const autoItem = el({ cursor: "help" });
+    autoItem.className = "bernini-pe-check-item";
+    autoItem.title = AUTO_ENHANCE_TIP;
     pe.autoCheck = document.createElement("input");
     pe.autoCheck.type = "checkbox";
     pe.autoCheck.checked = false;
     pe.autoCheck.title = AUTO_ENHANCE_TIP;
     pe.autoCheck.onchange = () => pe.syncToWidgets();
-    autoRow.appendChild(pe.autoCheck);
-    const autoLabel = el({ fontSize: "10px", color: "#b8c0d0", cursor: "help" }, "Auto-enhance");
+    autoItem.appendChild(pe.autoCheck);
+    const autoLabel = el({ cursor: "help" }, "自动扩写", "span");
     autoLabel.title = AUTO_ENHANCE_TIP;
-    autoRow.appendChild(autoLabel);
-    pe.unloadWrap = el({ display: "flex", gap: "4px", alignItems: "center" });
-    pe.unloadCheck = document.createElement("input"); pe.unloadCheck.type = "checkbox";
+    autoItem.appendChild(autoLabel);
+    optionsRow.appendChild(autoItem);
+
+    pe.unloadWrap = el({});
+    pe.unloadWrap.className = "bernini-pe-check-item";
+    pe.unloadCheck = document.createElement("input");
+    pe.unloadCheck.type = "checkbox";
     pe.unloadCheck.onchange = () => pe.syncToWidgets();
     pe.unloadWrap.appendChild(pe.unloadCheck);
-    pe.unloadCheckLabel = el({ fontSize: "10px", color: "#b8c0d0" }, "Unload Ollama");
+    pe.unloadCheckLabel = el({}, "用后卸载 Ollama", "span");
     pe.unloadWrap.appendChild(pe.unloadCheckLabel);
-    autoRow.appendChild(pe.unloadWrap);
-    pe.body.appendChild(autoRow);
+    optionsRow.appendChild(pe.unloadWrap);
+    pe.body.appendChild(optionsRow);
 
     const btnRow = el({ display: "flex", gap: "6px", flexDirection: "column" });
     const enhanceRow = el({ display: "flex", gap: "6px" });
@@ -388,7 +405,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     enhanceRow.appendChild(pe.enhanceAllBtn);
     btnRow.appendChild(enhanceRow);
     const utilRow = el({ display: "flex", gap: "6px" });
-    pe.unloadBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "6px 10px", fontSize: "10px", cursor: "pointer" }, "Unload Ollama", "button");
+    pe.unloadBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "6px 10px", fontSize: "10px", cursor: "pointer" }, "卸载 Ollama", "button");
     pe.unloadBtn.onclick = () => pe.unloadOllama();
     utilRow.appendChild(pe.unloadBtn);
     pe.unloadBtnRow = utilRow;
@@ -436,9 +453,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         }
         if (pe.unloadWrap) pe.unloadWrap.style.display = supportsUnload ? "flex" : "none";
         if (pe.unloadBtnRow) pe.unloadBtnRow.style.display = supportsUnload ? "flex" : "none";
-        const unloadText = fmt === API_OLLAMA ? "Unload Ollama" : "Unload Model (llama-swap)";
+        const unloadText = fmt === API_OLLAMA ? "用后卸载 Ollama" : "用后卸载模型 (llama-swap)";
         if (pe.unloadCheckLabel) pe.unloadCheckLabel.textContent = unloadText;
-        if (pe.unloadBtn) pe.unloadBtn.textContent = unloadText;
+        if (pe.unloadBtn) pe.unloadBtn.textContent = fmt === API_OLLAMA ? "卸载 Ollama" : "卸载模型 (llama-swap)";
         pe.urlInput.placeholder = defaultsForApiFormat(fmt).url;
         pe.modelInput.placeholder = defaultsForApiFormat(fmt).model;
     };
@@ -859,7 +876,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.handleServerEnhanced = (payload) => {
         if (!payload || String(payload.node) !== String(editor.node.id)) return;
         pe.setActivePromptText(payload.text || "");
-        pe.setStatus(`Auto-enhance 已应用（${(payload.text || "").length} 字符）`, "success");
+        pe.setStatus(`自动扩写已应用（${(payload.text || "").length} 字符）`, "success");
     };
 
     pe._lastOutputLanguage = null;
