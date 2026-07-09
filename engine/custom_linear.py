@@ -1,11 +1,17 @@
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
+
+from .native_quant import (
+    QuantizedTensor,
+    bind_native_quant_runtime_from_state_dict,
+    dequantize_weight_for_fallback,
+    logical_linear_shape,
+)
 from .gguf.gguf_utils import GGUFParameter, dequantize_gguf_tensor
 
 
 def _align_block_scale(scale: torch.Tensor, column_dim: int) -> torch.Tensor:
-    """Expand MXFP8 block-compressed scale rows to match weight width."""
     if scale.ndim < 2 or scale.shape[-1] == column_dim:
         return scale
     blocks = column_dim // scale.shape[-1]
@@ -85,9 +91,7 @@ except RuntimeError:
     pass
 
 
-#based on https://github.com/huggingface/diffusers/blob/main/src/diffusers/quantizers/gguf/utils.py
 def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, scale_weights=None, compile_args=None, modules_to_not_convert=[]):
-
     has_children = list(model.children())
     if not has_children:
         return
@@ -106,9 +110,7 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
             if weight_key not in state_dict:
                 continue
 
-            in_features = state_dict[weight_key].shape[1]
-            out_features = state_dict[weight_key].shape[0]
-
+            out_features, in_features = logical_linear_shape(state_dict, weight_key)
             is_gguf = isinstance(state_dict[weight_key], GGUFParameter)
 
             scale_weight = None
@@ -124,20 +126,26 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
                     compute_dtype=compute_dtype,
                     scale_weight=scale_weight,
                     allow_compile=allow_compile,
-                    is_gguf=is_gguf
+                    is_gguf=is_gguf,
                 )
             model._modules[name].source_cls = type(module)
+            model._modules[name]._layer_prefix = module_prefix
             model._modules[name].requires_grad_(False)
+            if not is_gguf:
+                bind_native_quant_runtime_from_state_dict(
+                    model._modules[name], state_dict, module_prefix, compute_dtype, torch.device("cpu")
+                )
 
     return model
 
-def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu")):
+
+def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu"), state_dict=None, compute_dtype=None):
     remove_lora_from_module(module)
     for name, child in module.named_children():
         params = list(child.parameters())
         device = params[0].device if params else torch.device("cpu")
         child_prefix = (f"{module_prefix}{name}.")
-        set_lora_params(child, patches, child_prefix, device)
+        set_lora_params(child, patches, child_prefix, device, state_dict, compute_dtype)
     if isinstance(module, CustomLinear):
         key = f"diffusion_model.{module_prefix}weight"
         patch = patches.get(key, [])
@@ -157,6 +165,14 @@ def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu"
                 else:
                     continue
             lora_strengths = [p[0] for p in patch]
+            if state_dict is not None:
+                bind_native_quant_runtime_from_state_dict(
+                    module,
+                    state_dict,
+                    key,
+                    compute_dtype if compute_dtype is not None else module.compute_dtype,
+                    device,
+                )
             module.set_lora_diffs(lora_diffs, device=device)
             module.set_lora_strengths(lora_strengths, device=device)
             module._step.fill_(0)
@@ -172,7 +188,7 @@ class CustomLinear(nn.Linear):
         device=None,
         scale_weight=None,
         allow_compile=False,
-        is_gguf=False
+        is_gguf=False,
     ) -> None:
         super().__init__(in_features, out_features, bias, device)
         self.compute_dtype = compute_dtype
@@ -182,6 +198,9 @@ class CustomLinear(nn.Linear):
         self.lora_strengths = []
         self.allow_compile = allow_compile
         self.is_gguf = is_gguf
+        self.quant_format = None
+        self.layout_type = None
+        self._full_precision_mm = False
         self._bernini_ops = torch.ops.bernini
 
         if allow_compile:
@@ -245,8 +264,48 @@ class CustomLinear(nn.Linear):
             return buf.index_select(0, self._step).squeeze(0)
         return buf[0]
 
+    def _has_lora_diffs(self):
+        return hasattr(self, "lora_diff_0_0")
+
+    def _uses_native_quant(self):
+        return self.quant_format is not None and not self._full_precision_mm
+
+    def _native_quant_weight(self, input):
+        weight = self.weight
+        if weight.device.type == "meta":
+            raise RuntimeError(
+                f"Native quant layer {getattr(self, '_layer_prefix', '?')} still has meta weights; reload the model."
+            )
+        if weight.device != input.device:
+            weight = weight.to(input.device)
+        return weight
+
+    def _apply_lora_to_output(self, input, out):
+        if not out.is_contiguous():
+            out = out.contiguous()
+        for idx, lora_diff_names in enumerate(self.lora_diffs):
+            strength = self._strength_at(idx)
+            if isinstance(lora_diff_names, tuple):
+                lora_a = getattr(self, lora_diff_names[0]).flatten(start_dim=1).to(device=input.device, dtype=out.dtype)
+                lora_b = getattr(self, lora_diff_names[1]).flatten(start_dim=1).to(device=input.device, dtype=input.dtype)
+                rank_scale = getattr(self, lora_diff_names[2])
+                alpha = float(rank_scale) / lora_b.shape[0] if rank_scale not in (None, 0.0) else 1.0
+                strength = strength.to(device=input.device, dtype=out.dtype)
+                rank_states = torch.nn.functional.linear(input, lora_b)
+                if rank_states.dtype != out.dtype:
+                    rank_states = rank_states.to(dtype=out.dtype)
+                out.view(-1, out.shape[-1]).addmm_(
+                    rank_states.reshape(-1, rank_states.shape[-1]),
+                    (lora_a * (strength * alpha)).t(),
+                )
+            else:
+                lora_diff = getattr(self, lora_diff_names).to(device=input.device, dtype=input.dtype)
+                strength = strength.to(device=input.device, dtype=input.dtype)
+                out = out + torch.nn.functional.linear(input, lora_diff) * strength
+        return out
+
     def _fold_lora_into_weight(self, weight):
-        if not hasattr(self, "lora_diff_0_0"):
+        if not self._has_lora_diffs():
             return weight
         for idx, spec in enumerate(self.lora_diffs):
             strength = self._strength_at(idx)
@@ -269,8 +328,22 @@ class CustomLinear(nn.Linear):
         return self.weight.to(input)
 
     def forward(self, input):
-        weight = self._resolve_weight(input)
         bias = self.bias.to(input if not self.is_gguf else self.compute_dtype) if self.bias is not None else None
+
+        if self._uses_native_quant() and isinstance(self.weight, QuantizedTensor):
+            weight = self._native_quant_weight(input)
+            if self._has_lora_diffs() and self.scale_weight is None:
+                out = self._matmul(input, weight, bias)
+                out = self._apply_lora_to_output(input, out)
+                return out
+            if self._has_lora_diffs():
+                weight = dequantize_weight_for_fallback(weight, self.compute_dtype or input.dtype)
+                weight = self._fold_lora_into_weight(weight)
+                return self._matmul(input, weight.to(input), bias)
+
+            return self._matmul(input, weight, bias)
+
+        weight = self._resolve_weight(input)
 
         if not self.is_gguf and self.scale_weight is not None:
             sw = _align_block_scale(self.scale_weight, weight.shape[-1])
@@ -284,10 +357,12 @@ class CustomLinear(nn.Linear):
         del weight, input, bias
         return out
 
+
 def update_lora_step(module, step):
     for submodule in module.modules():
         if isinstance(submodule, CustomLinear) and hasattr(submodule, "_step"):
             submodule._step.fill_(step)
+
 
 def remove_lora_from_module(module):
     for submodule in module.modules():

@@ -16,33 +16,7 @@ from .model import sinusoidal_embedding_1d, _bernini_text_cache_key, _module_to_
 
 def _embed_context_latents(model, x_list, context_latents, seq_len):
     """Patch-embed Bernini in-context reference tokens and append to the main stream."""
-    if not context_latents:
-        return x_list, seq_len, None
-
-    x = x_list
-    context_frame_shapes = []
-    for lat in context_latents:
-        if not isinstance(lat, torch.Tensor):
-            log.warning("Skipping invalid Bernini context latent (expected Tensor, got %s)", type(lat))
-            continue
-        if lat.ndim == 3:
-            lat = lat.unsqueeze(1)
-        elif lat.ndim != 4:
-            log.warning("Skipping Bernini context latent with unexpected rank %d", lat.ndim)
-            continue
-        lat = lat.to(device=x[0].device, dtype=x[0].dtype)
-        p_t, p_h, p_w = model.patch_size
-        pad_t = (p_t - (lat.shape[1] % p_t)) % p_t
-        pad_h = (p_h - (lat.shape[2] % p_h)) % p_h
-        pad_w = (p_w - (lat.shape[3] % p_w)) % p_w
-        if pad_t or pad_h or pad_w:
-            lat = F.pad(lat, (0, pad_w, 0, pad_h, 0, pad_t))
-        cl = model.original_patch_embedding(lat.unsqueeze(0).float()).to(x[0].dtype)
-        cl = cl.flatten(2).transpose(1, 2)
-        x = [torch.cat([u, cl], dim=1) for u in x]
-        seq_len = max(seq_len, x[0].shape[1])
-        context_frame_shapes.append(lat.shape[1:4])
-    return x, seq_len, context_frame_shapes
+    return model.embed_bernini_context_latents(x_list, context_latents, seq_len)
 
 
 def _embed_text_context(model, context, device):

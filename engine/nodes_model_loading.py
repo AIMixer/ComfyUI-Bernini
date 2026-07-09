@@ -11,6 +11,12 @@ from .wanvideo.modules.t5 import T5EncoderModel
 from .wanvideo.modules.clip import CLIPModel
 from .wanvideo.wan_video_vae import WanVideoVAE, WanVideoVAE38
 from .custom_linear import _replace_linear
+from .native_quant import (
+    has_native_quant_metadata,
+    is_native_quant_layer,
+    is_native_quant_weight_key,
+    materialize_native_quant_linears,
+)
 
 from accelerate import init_empty_weights
 from .utils import set_module_tensor_to_device, get_module_memory_mb_per_device
@@ -831,24 +837,63 @@ class WanVideoSetLoRAs:
 
         return (patcher,)
 
-def rename_fuser_block(name):
-    # map fuser blocks to main blocks
-    new_name = name
-    if "face_adapter.fuser_blocks." in name:
-        match = re.search(r'face_adapter\.fuser_blocks\.(\d+)\.', name)
-        if match:
-            fuser_block_num = int(match.group(1))
-            main_block_num = fuser_block_num * 5
-            new_name = name.replace(f"face_adapter.fuser_blocks.{fuser_block_num}.", f"blocks.{main_block_num}.fuser_block.")
-    return new_name
+def add_weight_scale_aliases(sd):
+    aliased_sd = dict(sd)
+    for key, value in sd.items():
+        if key.endswith(".weight_scale"):
+            aliased_sd.setdefault(key[:-len(".weight_scale")] + ".scale_weight", value)
+        elif key.endswith(".weight_scale_2"):
+            aliased_sd.setdefault(key[:-len(".weight_scale_2")] + ".scale_weight_2", value)
+        elif key.endswith(".scale_weight"):
+            aliased_sd.setdefault(key[:-len(".scale_weight")] + ".weight_scale", value)
+        elif key.endswith(".scale_weight_2"):
+            aliased_sd.setdefault(key[:-len(".scale_weight_2")] + ".weight_scale_2", value)
+    return aliased_sd
+
+
+def _module_index_from_prefix(prefix, marker):
+    if prefix is None or marker not in prefix:
+        return None
+    try:
+        return int(prefix[len(marker):].split(".", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_block_swap_load_device(prefix, transformer, block_swap_args, default_device):
+    if block_swap_args is None:
+        return default_device
+
+    block_idx = _module_index_from_prefix(prefix, "blocks.")
+    if block_idx is not None and "face" not in prefix and "controlnet_blocks." not in prefix:
+        blocks_to_swap = max(0, min(block_swap_args.get("blocks_to_swap", 0), len(transformer.blocks)))
+        swap_start_idx = len(transformer.blocks) - blocks_to_swap
+        return offload_device if block_idx >= swap_start_idx else device
+
+    vace_block_idx = _module_index_from_prefix(prefix, "vace_blocks.")
+    if vace_block_idx is not None and hasattr(transformer, "vace_blocks"):
+        vace_blocks_to_swap = block_swap_args.get("vace_blocks_to_swap", 0)
+        if (
+            vace_blocks_to_swap == 0
+            and getattr(transformer, "vace_layers", None) is not None
+            and block_swap_args.get("blocks_to_swap", 0) != -1
+        ):
+            vace_blocks_to_swap = 1
+        vace_blocks_to_swap = max(0, min(vace_blocks_to_swap, len(transformer.vace_blocks)))
+        vace_swap_start_idx = len(transformer.vace_blocks) - vace_blocks_to_swap
+        return offload_device if vace_block_idx >= vace_swap_start_idx else device
+
+    return device
+
 
 def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
                  transformer_load_device=None, block_swap_args=None, gguf=False, reader=None, patcher=None, compile_args=None):
     params_to_keep = {"time_in", "patch_embedding", "time_", "modulation", "text_embedding",
-                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob", "face_encoder", "fuser_block"}
+                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer", "audio_proj_glob"}
     param_count = sum(1 for _ in transformer.named_parameters())
     pbar = ProgressBar(param_count)
     block_idx = vace_block_idx = None
+    native_quant = has_native_quant_metadata(sd)
 
     if gguf:
         log.info("Using GGUF to load and assign model weights to device...")
@@ -866,7 +911,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
         for r in reader:
             all_tensors.extend(r.tensors)
         for tensor in all_tensors:
-            name = rename_fuser_block(tensor.name)
+            name = tensor.name
             if "glob" not in name and "multitalk_audio_proj" not in name and "audio_proj" in name:
                 name = name.replace("audio_proj", "multitalk_audio_proj")
             load_device = device
@@ -902,23 +947,45 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             transformer.gguf_patched = True
     else:
         log.info("Loading and assigning model weights to device...")
+        if native_quant:
+            native_quant_device_resolver = None
+            if block_swap_args is not None:
+                def native_quant_device_resolver(prefix):
+                    if is_native_quant_layer(sd, prefix):
+                        return _resolve_block_swap_load_device(
+                            prefix, transformer, block_swap_args, transformer_load_device
+                        )
+                    return None
+            rebuilt_quant = materialize_native_quant_linears(
+                transformer,
+                sd,
+                base_dtype,
+                transformer_load_device,
+                device_resolver=native_quant_device_resolver,
+            )
+            if rebuilt_quant:
+                log.info(
+                    f"ComfyUI native quant checkpoint: materialized {rebuilt_quant} QuantizedTensor layer(s)."
+                )
+                transformer.native_quant_patched = True
     named_params = transformer.named_parameters()
 
     for name, param in tqdm(named_params,
             desc=f"Loading transformer parameters to {transformer_load_device}",
             total=param_count,
             leave=True):
-        block_idx = vace_block_idx = None
-        if name.startswith("vace_blocks."):
-            try:
-                vace_block_idx = int(name.split("vace_blocks.")[1].split(".")[0])
-            except Exception:
-                vace_block_idx = None
-        elif name.startswith("blocks.") and "face" not in name and "controlnet_blocks." not in name:
-            try:
-                block_idx = int(name.split("blocks.")[1].split(".")[0])
-            except Exception:
-                block_idx = None
+        if not native_quant:
+            block_idx = vace_block_idx = None
+            if name.startswith("vace_blocks."):
+                try:
+                    vace_block_idx = int(name.split("vace_blocks.")[1].split(".")[0])
+                except Exception:
+                    vace_block_idx = None
+            elif name.startswith("blocks.") and "face" not in name and "controlnet_blocks." not in name:
+                try:
+                    block_idx = int(name.split("blocks.")[1].split(".")[0])
+                except Exception:
+                    block_idx = None
 
         if "loras" in name or "uni3c" in name:
             continue
@@ -928,11 +995,14 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             continue
 
         key = name.replace("_orig_mod.", "")
+        if not gguf and is_native_quant_weight_key(sd, key):
+            pbar.update(1)
+            continue
         value=sd[key]
-        keep_fp32 = ["patch_embedding", "motion_encoder", "condition_embedding"]
+        keep_fp32 = ["patch_embedding", "condition_embedding"]
 
         if gguf:
-            dtype_to_use = torch.float32 if "patch_embedding" in name or "motion_encoder" in name else base_dtype
+            dtype_to_use = torch.float32 if "patch_embedding" in name or "condition_embedding" in name else base_dtype
         else:
             dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else weight_dtype
             dtype_to_use = weight_dtype if value.dtype == weight_dtype else dtype_to_use
@@ -946,15 +1016,18 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
             if "modulation" in name or "norm" in name:
                 dtype_to_use = value.dtype if value.dtype == torch.float32 else base_dtype
 
-        load_device = transformer_load_device
-        if block_swap_args is not None:
-            load_device = device
-            if block_idx is not None:
-                if block_idx >= len(transformer.blocks) - block_swap_args.get("blocks_to_swap", 0):
-                    load_device = offload_device
-            elif vace_block_idx is not None:
-                if vace_block_idx >= len(transformer.vace_blocks) - block_swap_args.get("vace_blocks_to_swap", 0):
-                    load_device = offload_device
+        if native_quant:
+            load_device = _resolve_block_swap_load_device(name, transformer, block_swap_args, transformer_load_device)
+        else:
+            load_device = transformer_load_device
+            if block_swap_args is not None:
+                load_device = device
+                if block_idx is not None:
+                    if block_idx >= len(transformer.blocks) - block_swap_args.get("blocks_to_swap", 0):
+                        load_device = offload_device
+                elif vace_block_idx is not None:
+                    if vace_block_idx >= len(transformer.vace_blocks) - block_swap_args.get("vace_blocks_to_swap", 0):
+                        load_device = offload_device
         # Set tensor to device
         set_module_tensor_to_device(transformer, name, device=load_device, dtype=dtype_to_use, value=value)
         pbar.update(1)
@@ -1221,17 +1294,18 @@ class WanVideoModelLoader:
         from .bernini_unsupported import check_state_dict_for_unsupported
         check_state_dict_for_unsupported(sd, multitalk_model=multitalk_model)
 
-        is_wananimate = "pose_patch_embedding.weight" in sd
-        # rename WanAnimate face fuser block keys to insert into main blocks instead
-        if is_wananimate:
-            for key in list(sd.keys()):
-                new_key = rename_fuser_block(key)
-                if new_key != key:
-                    sd[new_key] = sd.pop(key)
+        native_quant = has_native_quant_metadata(sd)
+        if native_quant and merge_loras:
+            raise ValueError(
+                "ComfyUI native quantized models (int8/fp8/nvfp4) do not support LoRA merging. "
+                "Disable merge_loras in the LoRA select node."
+            )
+        if native_quant:
+            log.info("ComfyUI native quant checkpoint detected; loading via quant_ops.")
 
         is_scaled_fp8 = False
 
-        if quantization == "disabled":
+        if quantization == "disabled" and not native_quant:
             for k, v in sd.items():
                 if isinstance(v, torch.Tensor):
                     if v.dtype == torch.float8_e4m3fn:
@@ -1248,7 +1322,7 @@ class WanVideoModelLoader:
                         break
 
         scale_weights = {}
-        if "fp8" in quantization:
+        if "fp8" in quantization and not native_quant:
             for k, v in sd.items():
                 if k.endswith(".scale_weight") or k.endswith(".weight_scale"):
                     is_scaled_fp8 = True
@@ -1324,7 +1398,6 @@ class WanVideoModelLoader:
             patch_size = [1]
 
         is_humo = "audio_proj.audio_proj_glob_1.layer.weight" in sd
-        is_wananimate = "pose_patch_embedding.weight" in sd
 
         #lynx
         lynx_ip_layers = lynx_ref_layers = None
@@ -1473,7 +1546,6 @@ class WanVideoModelLoader:
             "cond_dim": sd["cond_encoder.weight"].shape[1] if "cond_encoder.weight" in sd else 0,
             "zero_timestep": model_type == "s2v",
             "humo_audio": is_humo,
-            "is_wananimate": is_wananimate,
             "rms_norm_function": rms_norm_function,
             "lynx_ip_layers": lynx_ip_layers,
             "lynx_ref_layers": lynx_ref_layers,
@@ -1560,7 +1632,8 @@ class WanVideoModelLoader:
 
         # LongCat Avatar / MultiTalk / SkyreelsV3 — rejected in check_state_dict_for_unsupported()
 
-        sd = {k.replace(".weight_scale", ".scale_weight"): v for k, v in sd.items()}
+        if not native_quant:
+            sd = {k.replace(".weight_scale", ".scale_weight"): v for k, v in sd.items()}
 
         # Additional cond latents
         if "add_conv_in.weight" in sd:
@@ -1660,13 +1733,15 @@ class WanVideoModelLoader:
                 transformer.dual_controller_freqs = dual_controller.freqs
 
 
+        sd = add_weight_scale_aliases(sd)
+
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device
         patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
         patcher.model.is_patched = False
 
         scale_weights = {}
-        if "fp8" in quantization:
+        if "fp8" in quantization and not native_quant:
             for k, v in sd.items():
                 if k.endswith(".scale_weight"):
                     scale_weights[k] = v.to(device, base_dtype)
@@ -1710,11 +1785,11 @@ class WanVideoModelLoader:
                     patcher.patches.clear()
                 transformer.patched_linear = False
                 sd = None
-            elif "scaled" in quantization or lora is not None:
+            elif "scaled" in quantization or lora is not None or native_quant:
                 transformer = _replace_linear(transformer, base_dtype, sd, scale_weights=scale_weights, compile_args=compile_args)
                 transformer.patched_linear = True
 
-        if "fast" in quantization:
+        if "fast" in quantization and not native_quant:
             if lora is not None and not merge_loras:
                 raise NotImplementedError("fp8_fast is not supported with unmerged LoRAs")
             from .fp8_optimization import convert_fp8_linear
@@ -1782,7 +1857,8 @@ class WanVideoModelLoader:
         patcher.model["control_lora"] = control_lora
         patcher.model["compile_args"] = compile_args
         patcher.model["gguf_reader"] = gguf_reader
-        patcher.model["fp8_matmul"] = "fast" in quantization
+        patcher.model["fp8_matmul"] = "fast" in quantization and not native_quant
+        patcher.model["native_quant"] = native_quant
         patcher.model["scale_weights"] = scale_weights
         patcher.model["sd"] = sd
         patcher.model["lora"] = lora

@@ -24,6 +24,10 @@ from ...bernini_unsupported import reject_echoshot, reject_multitalk, reject_mtv
 from ...custom_linear import update_lora_step
 from comfy.ldm.flux.math import apply_rope1 as apply_rope_comfy1
 from comfy.ldm.flux.math import apply_rope as apply_rope_comfy
+try:
+    from comfy.ldm.flux.math import rope as bernini_source_rope
+except ImportError:
+    bernini_source_rope = None
 from comfy import model_management as mm
 
 __all__ = ['WanModel']
@@ -929,7 +933,7 @@ class WanAttentionBlock(nn.Module):
     def __init__(self,
                 cross_attn_type, in_features, out_features, ffn_dim, ffn2_dim, num_heads,
                 qk_norm=True, cross_attn_norm=False, eps=1e-6, attention_mode="sdpa", rope_func="comfy", rms_norm_function="default",
-                use_motion_attn=False, use_humo_audio_attn=False, face_fuser_block=False, lynx_ip_layers=None, lynx_ref_layers=None,
+                use_motion_attn=False, use_humo_audio_attn=False, lynx_ip_layers=None, lynx_ref_layers=None,
                 block_idx=0, is_longcat=False):
         super().__init__()
         self.dim = out_features
@@ -949,7 +953,6 @@ class WanAttentionBlock(nn.Module):
 
         self.kv_cache = None
         self.use_motion_attn = use_motion_attn
-        self.has_face_fuser_block = face_fuser_block
         self.ref_attn_k_img = None
         self.ref_attn_v_img = None
 
@@ -988,10 +991,6 @@ class WanAttentionBlock(nn.Module):
         # HuMo audio cross-attn
         if use_humo_audio_attn:
             self.audio_cross_attn_wrapper = AudioCrossAttentionWrapper(in_features, out_features, num_heads, qk_norm, eps, kv_dim=1536)
-
-        if face_fuser_block:
-            from .wananimate.face_blocks import FaceBlock
-            self.fuser_block = FaceBlock(self.dim, num_heads)
 
         # Lynx
         self.ref_adapter = None
@@ -1764,25 +1763,26 @@ class AudioInjector_WAN(nn.Module):
                 self.injector_adain_output_layers = nn.ModuleList(
                     [nn.Linear(dim, dim) for _ in range(audio_injector_id)])
 
-def _rope_rotation(pos, dim, theta=10000.0):
-    """Generate 2x2 RoPE rotation matrices for spatial position encoding.
-    Returns tensor of shape [..., dim//2, 2, 2]."""
-    assert dim % 2 == 0
-    compute_dev = torch.device("cpu") if str(pos.device).startswith("cuda") else pos.device
-    half = dim // 2
-    # Frequency exponents: 0, 2/dim, 4/dim, ..., (dim-2)/dim
-    exponents = (torch.arange(half, dtype=torch.float64, device=compute_dev) * 2) / dim
-    omega = 1.0 / (theta ** exponents)  # [half]
-    pos_f = pos.to(dtype=torch.float32, device=compute_dev)
-    angles = pos_f.unsqueeze(-1) * omega  # [..., half]
-    c = torch.cos(angles)
-    s = torch.sin(angles)
-    rot = torch.zeros(*pos.shape, half, 2, 2, dtype=torch.float32, device=compute_dev)
-    rot[..., 0, 0] = c
-    rot[..., 0, 1] = -s
-    rot[..., 1, 0] = s
-    rot[..., 1, 1] = c
-    return rot.to(pos.device)
+def _compose_bernini_source_rotation(freqs, source_id, head_dim, theta):
+    """Bernini in-context stream rotation (ComfyUI PR #14216 / comfy.ldm.flux.math.rope)."""
+    if not source_id:
+        return freqs
+    pos = torch.tensor([[float(source_id)]], device=freqs.device, dtype=torch.float32)
+    if bernini_source_rope is not None:
+        rot = bernini_source_rope(pos, head_dim, theta)
+    else:
+        half = head_dim // 2
+        omega = 1.0 / (theta ** (torch.arange(half, dtype=torch.float64, device=pos.device) * 2 / head_dim))
+        angles = pos.to(torch.float32).unsqueeze(-1) * omega
+        rot = torch.stack(
+            [
+                torch.stack([torch.cos(angles), -torch.sin(angles)], dim=-1),
+                torch.stack([torch.sin(angles), torch.cos(angles)], dim=-1),
+            ],
+            dim=-2,
+        )
+    id_rot = rot.reshape(1, 1, 1, head_dim // 2, 2, 2).to(freqs.dtype)
+    return torch.einsum("...ij,...jk->...ik", freqs, id_rot)
 
 
 class WanModel(torch.nn.Module):
@@ -1800,8 +1800,6 @@ class WanModel(torch.nn.Module):
                 #s2v
                 cond_dim=0, audio_dim=1024, num_audio_token=4, enable_adain=False, zero_timestep=False,  humo_audio=False,
                 adain_mode="attn_norm", audio_inject_layers=[0, 4, 8, 12, 16, 20, 24, 27, 30, 33, 36, 39],
-                # WanAnimate
-                is_wananimate=False,  motion_encoder_dim=512,
                 # lynx
                 lynx_ip_layers=None, lynx_ref_layers=None,
                 # LongCat
@@ -1921,8 +1919,6 @@ class WanModel(torch.nn.Module):
 
         self.humo_audio = humo_audio
 
-        self.motion_encoder_dim = motion_encoder_dim
-
         self.base_dtype = dtype
 
         self.is_ovi_audio_model = patch_size == [1]
@@ -1997,7 +1993,7 @@ class WanModel(torch.nn.Module):
                                 qk_norm, cross_attn_norm, eps,
                                 attention_mode=self.attention_mode, rope_func=self.rope_func, rms_norm_function=rms_norm_function, 
                                 use_motion_attn=(i % 4 == 0 and use_motion_attn), use_humo_audio_attn=self.humo_audio,
-                                face_fuser_block = (i % 5 == 0 and is_wananimate), lynx_ip_layers=lynx_ip_layers, lynx_ref_layers=lynx_ref_layers,
+                                lynx_ip_layers=lynx_ip_layers, lynx_ref_layers=lynx_ref_layers,
                                 block_idx=i, is_longcat=is_longcat)
                 for i in range(num_layers)
             ])
@@ -2081,20 +2077,6 @@ class WanModel(torch.nn.Module):
             from ...HuMo.audio_proj import AudioProjModel
             self.audio_proj = AudioProjModel(seq_len=8, blocks=5, channels=1280, 
                 intermediate_dim=512, output_dim=1536, context_tokens=16)
-        # WanAnimate
-        self.motion_encoder = self.pose_patch_embedding = self.face_encoder = self.face_adapter = None
-        if is_wananimate:
-            from .wananimate.motion_encoder import MotionExtractor
-            from .wananimate.face_blocks import FaceEncoder
-            self.pose_patch_embedding = nn.Conv3d(16, dim, kernel_size=patch_size, stride=patch_size)
-            self.motion_encoder = MotionExtractor()
-
-            self.face_encoder = FaceEncoder(
-                in_dim=motion_encoder_dim,
-                out_dim=self.dim,
-                num_heads=4,
-                dtype=dtype
-            )
 
     def block_swap(self, blocks_to_swap, offload_txt_emb=False, offload_img_emb=False, vace_blocks_to_swap=None, prefetch_blocks=0, block_swap_debug=False):
         # Clamp blocks_to_swap to valid range
@@ -2235,41 +2217,73 @@ class WanModel(torch.nn.Module):
 
         return x
 
-    def wananimate_pose_embedding(self, x, pose_latents, strength=1.0):
-        pose_latents = [self.pose_patch_embedding(u.unsqueeze(0).to(torch.float32)).to(x[0].dtype) for u in pose_latents]
-        for x_, pose_latents_ in zip(x, pose_latents):
-            x_[:, :, 1:].add_(pose_latents_, alpha=strength)
-        return x
+    def embed_bernini_context_latents(self, x_list, context_latents, seq_len):
+        """Patch-embed Bernini in-context latents and record padded (F,H,W) for RoPE."""
+        if not context_latents:
+            return x_list, seq_len, None
 
+        streams = x_list
+        frame_shapes = []
+        for latent in context_latents:
+            if not isinstance(latent, torch.Tensor):
+                log.warning("Skipping invalid Bernini context latent (expected Tensor, got %s)", type(latent))
+                continue
+            if latent.ndim == 3:
+                latent = latent.unsqueeze(1)
+            elif latent.ndim != 4:
+                log.warning("Skipping Bernini context latent with unexpected rank %d", latent.ndim)
+                continue
 
-    def wananimate_face_embedding(self, face_pixel_values):
-        b,c,T,h,w = face_pixel_values.shape
-        face_pixel_values = rearrange(face_pixel_values, "b c t h w -> (b t) c h w")
+            latent = latent.to(device=streams[0].device, dtype=streams[0].dtype)
+            pt, ph, pw = self.patch_size
+            pad_t = (pt - latent.shape[1] % pt) % pt
+            pad_h = (ph - latent.shape[2] % ph) % ph
+            pad_w = (pw - latent.shape[3] % pw) % pw
+            if pad_t or pad_h or pad_w:
+                latent = torch.nn.functional.pad(latent, (0, pad_w, 0, pad_h, 0, pad_t))
 
-        encode_bs = 8
-        face_pixel_values_tmp = []
-        self.motion_encoder.to(self.main_device)
-        for i in range(math.ceil(face_pixel_values.shape[0]/encode_bs)):
-            face_pixel_values_tmp.append(self.motion_encoder(face_pixel_values[i*encode_bs:(i+1)*encode_bs]))
-        del face_pixel_values
-        self.motion_encoder.to(self.offload_device)
+            tokens = self.original_patch_embedding(latent.unsqueeze(0).float()).to(streams[0].dtype)
+            tokens = tokens.flatten(2).transpose(1, 2)
+            streams = [torch.cat([stream, tokens], dim=1) for stream in streams]
+            seq_len = max(seq_len, streams[0].shape[1])
+            frame_shapes.append(latent.shape[1:4])
 
-        motion_vec = rearrange(torch.cat(face_pixel_values_tmp), "(b t) c -> b t c", t=T)
-        del face_pixel_values_tmp
-        self.face_encoder.to(self.main_device)
-        motion_vec = self.face_encoder(motion_vec.to(self.face_encoder.dtype))
-        self.face_encoder.to(self.offload_device)
+        if not frame_shapes:
+            return x_list, seq_len, None
+        return streams, seq_len, frame_shapes
 
-        B, L, H, C = motion_vec.shape
-        pad_face = torch.zeros(B, 1, H, C, device=motion_vec.device, dtype=motion_vec.dtype)
-        return torch.cat([pad_face, motion_vec], dim=1)
+    def rope_encode_bernini_context(
+        self,
+        frame_f,
+        frame_h,
+        frame_w,
+        *,
+        context_window_start=0,
+        source_id=0,
+        ntk_alphas=(1, 1, 1),
+        device=None,
+        dtype=None,
+    ):
+        """RoPE block for one Bernini in-context stream (source_id 1..N; target stream is 0)."""
+        pt, ph, pw = self.patch_size
+        t_len = (frame_f + (pt // 2)) // pt
+        h_len = (frame_h + (ph // 2)) // ph
+        w_len = (frame_w + (pw // 2)) // pw
 
+        grid = torch.zeros((t_len, h_len, w_len, 3), device=device, dtype=dtype)
+        grid[..., 0] += torch.linspace(
+            context_window_start,
+            context_window_start + (t_len - 1),
+            steps=t_len,
+            device=device,
+            dtype=dtype,
+        ).view(-1, 1, 1)
+        grid[..., 1] += torch.linspace(0, h_len - 1, steps=h_len, device=device, dtype=dtype).view(1, -1, 1)
+        grid[..., 2] += torch.linspace(0, w_len - 1, steps=w_len, device=device, dtype=dtype).view(1, 1, -1)
 
-    def wananimate_forward(self, block, x, motion_vec, strength=1.0, motion_masks=None):
-            adapter_args = [x, motion_vec, motion_masks]
-            residual_out = block.fuser_block(*adapter_args)
-            return x.add(residual_out, alpha=strength)
-
+        freqs = self.rope_embedder(grid.reshape(1, -1, 3), ntk_alphas).movedim(1, 2)
+        head_dim = self.dim // self.num_heads
+        return _compose_bernini_source_rotation(freqs, source_id, head_dim, self.rope_embedder.theta)
 
     def rope_encode_comfy(self, t, h, w, freq_offset=0, t_start=0, ref_frame_shape=None, pose_frame_shape=None,
                           steps_t=None, steps_h=None, steps_w=None, ntk_alphas=[1,1,1], device=None, dtype=None,
@@ -2369,31 +2383,21 @@ class WanModel(torch.nn.Module):
 
             freqs = torch.cat([main_freqs, pose_freqs], dim=1)
 
-        # In-context reference (Bernini): per-stream RoPE segments with source_id rotation
-        if context_frame_shapes is not None:
-            d = self.dim // self.num_heads
-            ctx_freqs_list = []
-            for i, (ctx_t, ctx_h, ctx_w) in enumerate(context_frame_shapes):
-                ctx_t_len = ((ctx_t + (self.patch_size[0] // 2)) // self.patch_size[0])
-                ctx_h_len = ((ctx_h + (self.patch_size[1] // 2)) // self.patch_size[1])
-                ctx_w_len = ((ctx_w + (self.patch_size[2] // 2)) // self.patch_size[2])
-                ctx_ids = torch.zeros((ctx_t_len, ctx_h_len, ctx_w_len, 3), device=device, dtype=dtype)
-                ctx_ids[:, :, :, 0] = ctx_ids[:, :, :, 0] + torch.linspace(
-                    context_window_start, context_window_start + (ctx_t_len - 1),
-                    steps=ctx_t_len, device=device, dtype=dtype).reshape(-1, 1, 1)
-                ctx_ids[:, :, :, 1] = ctx_ids[:, :, :, 1] + torch.linspace(0, ctx_h_len - 1, steps=ctx_h_len, device=device, dtype=dtype).reshape(1, -1, 1)
-                ctx_ids[:, :, :, 2] = ctx_ids[:, :, :, 2] + torch.linspace(0, ctx_w_len - 1, steps=ctx_w_len, device=device, dtype=dtype).reshape(1, 1, -1)
-                ctx_ids = ctx_ids.reshape(1, -1, ctx_ids.shape[-1])
-                ctx_freqs = self.rope_embedder(ctx_ids, ntk_alphas).movedim(1, 2)
-
-                # Source ID rotation: distinguish context streams from the main content
-                source_id = i + 1
-                pos = torch.tensor([[float(source_id)]], device=ctx_freqs.device, dtype=torch.float32)
-                id_rot = _rope_rotation(pos, d, self.rope_embedder.theta).reshape(1, 1, 1, d // 2, 2, 2).to(ctx_freqs.dtype)
-                ctx_freqs = torch.einsum('...ij,...jk->...ik', ctx_freqs, id_rot)
-
-                ctx_freqs_list.append(ctx_freqs)
-            freqs = torch.cat([freqs] + ctx_freqs_list, dim=1)
+        if context_frame_shapes:
+            context_freqs = [
+                self.rope_encode_bernini_context(
+                    ctx_f,
+                    ctx_h,
+                    ctx_w,
+                    context_window_start=context_window_start,
+                    source_id=stream_idx + 1,
+                    ntk_alphas=ntk_alphas,
+                    device=device,
+                    dtype=dtype,
+                )
+                for stream_idx, (ctx_f, ctx_h, ctx_w) in enumerate(context_frame_shapes)
+            ]
+            freqs = torch.cat([freqs, *context_freqs], dim=1)
 
         return freqs
 
@@ -2430,8 +2434,6 @@ class WanModel(torch.nn.Module):
         s2v_audio_input=None, s2v_ref_latent=None, s2v_audio_scale=1.0,
         s2v_ref_motion=None, s2v_pose=None, s2v_motion_frames=[1, 0],
         humo_audio=None, humo_audio_scale=1.0,
-        wananim_pose_latents=None, wananim_face_pixel_values=None,
-        wananim_pose_strength=1.0, wananim_face_strength=1.0,
         lynx_embeds=None,
         x_ovi=None, seq_len_ovi=None, ovi_negative_text_embeds=None,
         flashvsr_LQ_latent=None, flashvsr_strength=1.0,
@@ -2661,14 +2663,6 @@ class WanModel(torch.nn.Module):
             freqs_ovi = rope_params(1024, d - 4 * (d // 6), freqs_scaling=0.19676).to(self.main_device)
             x_ovi = x_ovi.to(self.main_device, self.base_dtype)
 
-        # WanAnimate
-        motion_vec = None
-        if wananim_face_pixel_values is not None:
-            motion_vec = self.wananimate_face_embedding(wananim_face_pixel_values).to(self.base_dtype)
-
-        if wananim_pose_latents is not None:
-            x = self.wananimate_pose_embedding(x, wananim_pose_latents, strength=wananim_pose_strength)
-
         # s2v pose embedding
         if s2v_pose is not None:
             x[0] = x[0] + self.cond_encoder(s2v_pose.to(self.cond_encoder.weight.dtype)).to(self.base_dtype)
@@ -2701,31 +2695,8 @@ class WanModel(torch.nn.Module):
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
 
-        # In-context reference (Bernini): patch-embed context_latents and append as extra tokens
-        if context_latents is not None and len(context_latents) > 0:
-            context_frame_shapes = []
-            for lat in context_latents:
-                if not isinstance(lat, torch.Tensor):
-                    log.warning("Skipping invalid Bernini context latent (expected Tensor, got %s)", type(lat))
-                    continue
-                if lat.ndim == 3:
-                    lat = lat.unsqueeze(1)
-                elif lat.ndim != 4:
-                    log.warning("Skipping Bernini context latent with unexpected rank %d", lat.ndim)
-                    continue
-                lat = lat.to(device=x[0].device, dtype=x[0].dtype)
-                # Pad spatial dims to patch_size so RoPE token count matches Conv3d output
-                p_t, p_h, p_w = self.patch_size
-                pad_t = (p_t - (lat.shape[1] % p_t)) % p_t
-                pad_h = (p_h - (lat.shape[2] % p_h)) % p_h
-                pad_w = (p_w - (lat.shape[3] % p_w)) % p_w
-                if pad_t or pad_h or pad_w:
-                    lat = torch.nn.functional.pad(lat, (0, pad_w, 0, pad_h, 0, pad_t))
-                cl = self.original_patch_embedding(lat.unsqueeze(0).float()).to(x[0].dtype)
-                cl = cl.flatten(2).transpose(1, 2)
-                x = [torch.cat([u, cl], dim=1) for u in x]
-                seq_len = max(seq_len, x[0].shape[1])
-                context_frame_shapes.append(lat.shape[1:4])  # (F, H, W) — padded
+        if context_latents:
+            x, seq_len, context_frame_shapes = self.embed_bernini_context_latents(x, context_latents, seq_len)
 
         prev_latent = None
         if dual_control_input is not None:
@@ -3449,8 +3420,6 @@ class WanModel(torch.nn.Module):
 
                 if self.audio_injector is not None and s2v_audio_input is not None:
                     x = self.audio_injector_forward(b, x, merged_audio_emb, scale=s2v_audio_scale) #s2v
-                if block.has_face_fuser_block and motion_vec is not None:
-                    x = self.wananimate_forward(block, x, motion_vec, strength=wananim_face_strength)
                 if self.block_swap_debug:
                     compute_end = time.perf_counter()
                     compute_time = compute_end - compute_start
