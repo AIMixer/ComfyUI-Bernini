@@ -1,4 +1,18 @@
-# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+# Original upstream Copyright (c) 2025 kijai
+# Modified from engine core modules of ComfyUI-WanVideoWrapper
+# Original upstream project: https://github.com/kijai/ComfyUI-WanVideoWrapper
+# Secondary extended Copyright (c) 2026 wuwukasi/wuwukaka
+# Further modified and functionally extended from ComfyUI-WanAnimatePlus
+# Secondary extension project: https://github.com/wuwukaka/ComfyUI-WanAnimatePlus
+# Current modified portions Copyright (c) 2026 AIMixer.
+#   - Adapted multi-condition Bernini latent encoding and automatic multi-task recognition logic (T2V/I2V/V2V/RV2V/R2V) for full Bernini pipeline.
+#   - Integrated prefix frame multi-reference injection and transition video seamless frame connection mechanism for Bernini video generation and editing scenarios.
+#   - Refactored sampler graph-detach protection mechanism to adapt Bernini dual-stage HIGH/LOW denoising workflow and timeline segmented generation.
+#   - Optimized context latents and context roles propagation logic for Bernini multi-segment continuous video generation.
+#   - Adapted canvas expansion calculation and Uni3C control rendering logic to match Bernini Director node workflow specifications.
+#   - Inherited optimized tiled VAE encoding and adaptive VRAM offloading strategies to improve Bernini pipeline memory efficiency.
+# Licensed under the Apache License, Version 2.0
+
 import math
 import torch
 import torch.nn as nn
