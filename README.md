@@ -106,13 +106,13 @@ After download: merge `models/` into `ComfyUI/models`, install plugins/deps, dra
 
 ## Acknowledgements
 
-The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (Apache-2.0). Deep respect and gratitude to kijai and all contributors to the WanVideo ecosystem.
+The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (Apache-2.0) and [wuwukaka/ComfyUI-WanAnimatePlus](https://github.com/wuwukaka/ComfyUI-WanAnimatePlus). Deep respect and gratitude to kijai and all contributors to the WanVideo ecosystem.
 
 ## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE).
 
-The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (also Apache-2.0). See [Acknowledgements](#acknowledgements).
+The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (also Apache-2.0) and [wuwukaka/ComfyUI-WanAnimatePlus](https://github.com/wuwukaka/ComfyUI-WanAnimatePlus).. See [Acknowledgements](#acknowledgements).
 
 ---
 
