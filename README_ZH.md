@@ -1,5 +1,19 @@
 # ComfyUI-Bernini
 
+> **维护说明：本仓库已停止更新。**
+>
+> 最新版 **Bernini 导演台**（多段时间轴）请迁移至
+> **[AIMixer/ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director)**。
+>
+> 我们已全面改用 **ComfyUI 官方 Bernini-R 技术路径**
+> （原生 `VAE` / `MODEL` / `CLIP`、`context_latents`、双阶段 `KSamplerAdvanced`；
+> 详见 [PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216)）。
+> 相较本仓库的独立 wrapper 旧链路，官方路径通常更**稳定**、**优化更完善**、实际运行也更**快**，
+> 并能随 ComfyUI 核心一并获得持续改进。
+>
+> **后续功能与修复将全部基于官方技术路径维护，仅在新仓库发布。**
+> 本仓库仅保留作历史参考。
+
 独立的 ComfyUI 插件，提供 **完整的 Wan 2.2 Bernini 视频生成/编辑链路**，不依赖 ComfyUI 核心 Bernini 节点（[PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216)）。
 
 基于 [Bernini](https://bernini-ai.github.io/) 论文框架：MLLM 语义规划 + DiT 渲染，通过 in-context `context_latents` 实现 v2v / rv2v / r2v / t2v。

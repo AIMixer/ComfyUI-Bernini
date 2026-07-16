@@ -1,5 +1,20 @@
 # ComfyUI-Bernini
 
+> **Maintenance notice — this repository is no longer actively developed.**
+>
+> For the latest **Bernini Director** (multi-segment timeline), please migrate to
+> **[AIMixer/ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director)**.
+>
+> We have switched fully to the **official ComfyUI Bernini-R stack**
+> (native `VAE` / `MODEL` / `CLIP`, `context_latents`, dual-stage `KSamplerAdvanced`;
+> see [PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216)). Compared with the
+> legacy wrapper pipeline in this repo, the official path is generally **more stable**,
+> **better optimized**, and **faster** in real runs, and it tracks ComfyUI core
+> improvements automatically.
+>
+> **All future maintenance and feature work will land only on the official-path project.**
+> This repository remains available as a historical reference.
+
 Standalone ComfyUI plugin with a **complete Wan 2.2 Bernini pipeline** that does not depend on ComfyUI core Bernini nodes ([PR #14216](https://github.com/Comfy-Org/ComfyUI/pull/14216)).
 
 **中文文档** → [README_ZH.md](README_ZH.md)
