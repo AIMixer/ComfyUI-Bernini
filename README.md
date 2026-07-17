@@ -1,5 +1,9 @@
 # ComfyUI-Bernini
 
+**最新版 Bernini 导演台（多段时间轴）请迁移至 [AIMixer/ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director)。**
+
+**For the latest Bernini Director (multi-segment timeline), please migrate to [AIMixer/ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director).**
+
 > **Maintenance notice — this repository is no longer actively developed.**
 >
 > For the latest **Bernini Director** (multi-segment timeline), please migrate to
